@@ -1,0 +1,8 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+
+# Local video and Dataset
+data/raw_videos/*.mp4
+data/raw_videos/*.mov
