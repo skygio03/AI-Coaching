@@ -6,3 +6,9 @@ venv/
 # Local video and Dataset
 data/raw_videos/*.mp4
 data/raw_videos/*.mov
+
+# Virtual environment
+.venv/
+
+# Videos and data
+data/*
