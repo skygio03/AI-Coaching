@@ -1,0 +1,97 @@
+"""Draw the detected skeleton on a video and save the result."""
+
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+from src.pose_extractor import NAMES
+
+# Pairs of landmarks joined by a line
+EDGES = [
+    ("l_shoulder", "r_shoulder"), ("l_hip", "r_hip"),
+    ("l_shoulder", "l_hip"), ("r_shoulder", "r_hip"),
+    ("l_shoulder", "l_elbow"), ("l_elbow", "l_wrist"),
+    ("r_shoulder", "r_elbow"), ("r_elbow", "r_wrist"),
+    ("l_hip", "l_knee"), ("l_knee", "l_ankle"),
+    ("r_hip", "r_knee"), ("r_knee", "r_ankle"),
+    ("l_ankle", "l_heel"), ("l_heel", "l_toe"), ("l_ankle", "l_toe"),
+    ("r_ankle", "r_heel"), ("r_heel", "r_toe"), ("r_ankle", "r_toe"),
+]
+
+# Colors are BGR (OpenCV order): left side blue, right side orange
+LEFT_COLOR = (255, 128, 0)
+RIGHT_COLOR = (0, 128, 255)
+CENTER_COLOR = (200, 200, 200)
+
+
+def _edge_color(a, b):
+    if a.startswith("l_") and b.startswith("l_"):
+        return LEFT_COLOR
+    if a.startswith("r_") and b.startswith("r_"):
+        return RIGHT_COLOR
+    return CENTER_COLOR
+
+
+def _valid(p):
+    """True if the landmark was detected (no NaN in its coordinates)."""
+    return not np.isnan(p).any()
+
+
+def render_skeleton(video_path, out_path, fps, points, strikes_left, strikes_right,
+                    flash_frames=6):
+    """Write a copy of the video with the skeleton drawn on every frame.
+
+    A ring is drawn around the ankle for a few frames after each detected foot strike.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    cap = cv2.VideoCapture(str(video_path))
+    writer = None
+    index = {name: i for i, name in enumerate(NAMES)}
+
+    i = 0
+    while i < len(points):
+        ok, frame = cap.read()
+        if not ok:
+            break
+
+        # Create the writer on the first frame, using the real frame size
+        if writer is None:
+            h, w = frame.shape[:2]
+            writer = cv2.VideoWriter(
+                str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h)
+            )
+
+        row = points[i]
+
+        # Bones
+        for a, b in EDGES:
+            pa, pb = row[index[a]], row[index[b]]
+            if _valid(pa) and _valid(pb):
+                cv2.line(frame, tuple(pa.astype(int)), tuple(pb.astype(int)),
+                         _edge_color(a, b), 3)
+
+        # Joints
+        for name, k in index.items():
+            if _valid(row[k]):
+                cv2.circle(frame, tuple(row[k].astype(int)), 5, (255, 255, 255), -1)
+
+        # Ring around the ankle for a few frames after each foot strike
+        for strikes, ankle, color, label in (
+            (strikes_left, "l_ankle", LEFT_COLOR, "L"),
+            (strikes_right, "r_ankle", RIGHT_COLOR, "R"),
+        ):
+            if any(0 <= i - s < flash_frames for s in strikes) and _valid(row[index[ankle]]):
+                center = tuple(row[index[ankle]].astype(int))
+                cv2.circle(frame, center, 22, color, 3)
+                cv2.putText(frame, label, (center[0] + 26, center[1]),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
+
+        writer.write(frame)
+        i += 1
+
+    cap.release()
+    if writer is not None:
+        writer.release()
