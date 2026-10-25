@@ -10,14 +10,16 @@ from src.pose_extractor import extract_landmarks, NAMES
 from src.render import render_skeleton
 
 # ---------------------------------------------------------------------------
-# Settings. The values marked "assumption" are my own choices, NOT taken from
-# the paper (which gives no thresholds); check them against the video.
+# Settings. Values marked "assumption" are my own choices, NOT taken from the
+# paper (which gives no thresholds); check them against the video.
 # ---------------------------------------------------------------------------
-TOUCHDOWN_LEVEL = 0.83        # how close to the ground the foot must be to count as touchdown
-LOADING_DELAY_S = 0.05        # assumption: loading response happens ~50 ms after touchdown
-PELVIS_HALF_BAND = 0.10       # assumption: half-width of the "under the pelvis" zone,
-                              # as a fraction of leg length
-VERTICAL_TIBIA_TOL_DEG = 3.0  # assumption: shank within +/- this angle of vertical = "vertical"
+TOUCHDOWN_LEVEL = 0.83   # how close to the ground the foot must be to count as touchdown
+LOADING_DELAY_S = 0.05   # assumption: loading response happens ~50 ms after touchdown
+
+# Report rules (all assumptions)
+MIN_FPS_FOR_EVENT_MEASURES = 100  # below this, landing and tibia angle depend on the exact frame
+MIN_STRIKES_PER_LEG = 8           # fewer usable strikes = too little data to summarize a leg
+MIN_DURATION_S = 10.0             # shorter clips give too few steps
 
 
 # ------------------------------- basic helpers -------------------------------
@@ -124,10 +126,14 @@ def detect_strikes(points, fps, foot, level=TOUCHDOWN_LEVEL, window_s=0.3, groun
     return np.array(touchdowns, dtype=int), np.array(toe_offs, dtype=int)
 
 
+def loading_delay_frames(fps):
+    """Number of frames between touchdown and the loading response (at least 1)."""
+    return max(1, int(round(LOADING_DELAY_S * fps)))
+
+
 def loading_frame(touchdown, toe_off, fps):
     """Frame of the loading response: shortly after touchdown, never after toe-off."""
-    delay = max(1, int(round(LOADING_DELAY_S * fps)))
-    return min(touchdown + delay, toe_off)
+    return min(touchdown + loading_delay_frames(fps), toe_off)
 
 
 def cadence_from_strides(touchdowns_by_foot, fps):
@@ -219,6 +225,7 @@ def vertical_oscillation(points, fps, all_touchdowns, length):
         values.append((segment.max() - segment.min()) / length * 100)
     return values
 
+
 def sensitivity(points, td_ok, off_ok, foot, direction, length):
     """Median landing offset and tibia angle if the loading frame is 1, 2 or 3 frames
     after touchdown. A large spread means the measure depends on timing, not on form."""
@@ -230,7 +237,47 @@ def sensitivity(points, td_ok, off_ok, foot, direction, length):
         rows.append((k, float(np.nanmedian(land)), float(np.nanmedian(tib))))
     return rows
 
-# --------------------------------- reporting ----------------------------------
+
+def analyze_leg(points, fps, foot, td, off, direction):
+    """Measure one leg and return the results as a dict (nothing is printed here)."""
+    # Ground contact time in ms; values outside 100-500 ms are detection errors
+    contact = np.array([(b - a) / fps * 1000 for a, b in zip(td, off)])
+    plausible = (contact >= 100) & (contact <= 500)
+    discarded = [f"{a / fps:.1f}s ({(b - a) / fps * 1000:.0f} ms)"
+                 for a, b, ok in zip(td, off, plausible) if not ok]
+
+    td_ok, off_ok = td[plausible], off[plausible]
+    length = leg_length(points, foot)
+
+    # Knee flexion (0 deg = straight leg), the convention used in the paper
+    flex_touchdown = [180 - knee_angle_at(points, f, foot) for f in td_ok]
+    peak_flexion = []
+    for a, b in zip(td_ok, off_ok):
+        angles = [knee_angle_at(points, f, foot) for f in range(a, b + 1)]
+        angles = [x for x in angles if not np.isnan(x)]
+        peak_flexion.append(180 - min(angles) if angles else float("nan"))
+    excursion = list(np.array(peak_flexion) - np.array(flex_touchdown))
+
+    # Overstride and tibia angle, both read at the loading response
+    lr = [loading_frame(a, b, fps) for a, b in zip(td_ok, off_ok)]
+    landing = [landing_offset(points, f, foot, direction, length) * 100 for f in lr]
+    tibia = [tibia_angle(points, f, foot, direction) for f in lr]
+
+    return {
+        "strikes_total": len(td),
+        "strikes_used": len(td_ok),
+        "discarded": discarded,
+        "flex_touchdown": flex_touchdown,
+        "peak_flexion": peak_flexion,
+        "excursion": excursion,
+        "landing": landing,
+        "tibia": tibia,
+        "sensitivity": (sensitivity(points, td_ok, off_ok, foot, direction, length)
+                        if len(td_ok) else []),
+    }
+
+
+# ------------------------------ technical output -------------------------------
 
 def summarize(values):
     """Return (median, 25th percentile, 75th percentile, count), ignoring NaN."""
@@ -249,8 +296,205 @@ def report(label, values, unit, decimals=0, what="strikes"):
     print(f"  {label}: {med:.{d}f} {unit} (middle half: {lo:.{d}f} to {hi:.{d}f}, {n} {what})")
 
 
+def print_details(label, leg):
+    """Print the technical numbers of one leg."""
+    print(f"\n{label} leg")
+    if leg["discarded"]:
+        print(f"  {len(leg['discarded'])} of {leg['strikes_total']} strikes discarded "
+              f"(implausible stance window) at: {', '.join(leg['discarded'])}")
+    report("Knee flexion at touchdown", leg["flex_touchdown"], "deg")
+    report("Knee peak flexion in stance", leg["peak_flexion"], "deg")
+    report("Knee excursion (touchdown to peak)", leg["excursion"], "deg")
+    report("Ankle vs pelvis at loading response", leg["landing"], "% of leg length")
+    report("Tibia angle at loading response (knee in front = positive)", leg["tibia"], "deg")
+    if leg["sensitivity"]:
+        print("  Sensitivity to the loading frame (landing vs pelvis, tibia angle):")
+        for k, land, tib in leg["sensitivity"]:
+            print(f"    +{k} frame: {land:.0f} % of leg length, {tib:.0f} deg")
+
+
+# ---------------------------------- the report ----------------------------------
+
+def landing_summary(leg):
+    """Return (lowest, highest, all_ahead) of the median landing offset over the 1-, 2-
+    and 3-frame readings, or None if there is no data.
+
+    all_ahead = True if the ankle is in front of the pelvis centre in every reading.
+    """
+    values = [land for _, land, _ in leg["sensitivity"] if not np.isnan(land)]
+    if not values:
+        return None
+    return min(values), max(values), all(v > 0 for v in values)
+
+
+def fmt(values, decimals=0):
+    """Format a list of values as 'median (from lo to hi)', using the middle half."""
+    med, lo, hi, n = summarize(values)
+    if n == 0:
+        return "n/a"
+    d = decimals
+    return f"{med:.{d}f} (from {lo:.{d}f} to {hi:.{d}f})"
+
+
+def compare_legs(label, left_values, right_values, unit):
+    """Return a sentence if the legs clearly differ, else None.
+
+    "Clearly" = the middle halves of the two distributions do not overlap.
+    """
+    ml, lo_l, hi_l, nl = summarize(left_values)
+    mr, lo_r, hi_r, nr = summarize(right_values)
+    if nl == 0 or nr == 0:
+        return None
+    if max(lo_l, lo_r) <= min(hi_l, hi_r):
+        return None
+    side = "right" if mr > ml else "left"
+    return (f"{label}: higher on the {side} "
+            f"({max(ml, mr):.0f} vs {min(ml, mr):.0f} {unit}).")
+
+
+def print_report(fps, duration, speed_kmh, cadence, osc, trunk, legs):
+    """Print a plain-language summary. `legs` is {"left": leg_dict, "right": leg_dict}.
+
+    Only measures that are reliable enough are shown as exact results; at low frame
+    rates the foot landing position is shown as a range, and the tibia angle is left out.
+    """
+    bar = "=" * 64
+    print(f"\n{bar}\nREPORT\n{bar}")
+    speed = f"{speed_kmh:g} km/h" if speed_kmh else "not provided"
+    print(f"Video: {duration:.1f} s at {fps:.0f} fps | running speed: {speed}")
+    print("These are measurements, not a diagnosis: the article 'An Evidence-Based "
+          "Videotaped Running Biomechanics Analysis' gives no cut-off values between "
+          "normal and abnormal.")
+    print("'from X to Y' is the middle half of the strikes, i.e. how much the measure "
+          "varies from step to step.")
+
+    high_fps = fps >= MIN_FPS_FOR_EVENT_MEASURES
+    usable = {n: leg for n, leg in legs.items() if leg["strikes_used"] >= MIN_STRIKES_PER_LEG}
+
+    # Limits of this particular recording
+    limits = []
+    if duration < MIN_DURATION_S:
+        limits.append(f"The video is shorter than {MIN_DURATION_S:.0f} seconds: few steps, "
+                      "less stable measures.")
+    if not high_fps:
+        limits.append(f"Only {fps:.0f} frames per second (one frame = {1000 / fps:.0f} ms): "
+                      "foot position at landing is given only as a range and the tibia "
+                      "angle cannot be measured reliably.")
+    for name, leg in legs.items():
+        if name not in usable:
+            limits.append(f"{name.capitalize()} leg: only {leg['strikes_used']} usable strikes "
+                          f"(at least {MIN_STRIKES_PER_LEG} are needed), so it is not summarized.")
+    if limits:
+        print("\nANALYSIS LIMITS")
+        for text in limits:
+            print(f"- {text}")
+
+    # Whole body
+    print("\nWHOLE BODY")
+    if not np.isnan(cadence):
+        print(f"- Cadence: {cadence:.0f} steps/min. There is no ideal cadence for everyone: "
+              "the article notes that the roughly 180 steps/min often quoted comes from "
+              "running-economy studies rather than injury studies, and that raising cadence "
+              "by about 10% is associated with less vertical oscillation and lower knee loads.")
+    if summarize(osc)[3]:
+        print(f"- Vertical oscillation of the pelvis: {fmt(osc, 1)} % of leg length. "
+              "According to the article, a larger vertical excursion is associated with "
+              "higher impact and braking forces. There are no cut-off values: it is mainly "
+              "useful for comparing videos filmed the same way.")
+    med, lo, hi, n = summarize(trunk)
+    if n:
+        print(f"- Trunk lean: {med:.0f}° (positive = leaning forward; from {lo:.0f} to {hi:.0f}). "
+              "It also depends on how level the camera is; according to the article, the "
+              "evidence on which trunk lean is preferable is still limited.")
+
+    # Knee
+    if usable:
+        print("\nKNEE (flexion: 0° = straight leg)")
+        for name, leg in usable.items():
+            print(f"- {name.capitalize()} leg: at touchdown {fmt(leg['flex_touchdown'])}°, "
+                  f"peak in stance {fmt(leg['peak_flexion'])}°")
+        print("  The article states that peak knee flexion in stance approaches about 45° on "
+              "average and that much lower values may suggest reduced shock absorption, but "
+              "it gives no cut-offs. Estimates from 2D video are approximate.")
+
+    # Foot position at touchdown: always shown, but at low frame rates only as a range
+    if usable:
+        print("\nFOOT POSITION AT LANDING (read together with the other measures)")
+        for name, leg in usable.items():
+            if high_fps:
+                print(f"- {name.capitalize()} leg: ankle relative to pelvis {fmt(leg['landing'])} % "
+                      f"of leg length (positive = in front); tibia angle {fmt(leg['tibia'])}° "
+                      f"(positive = knee in front of the ankle)")
+                continue
+            summary = landing_summary(leg)
+            if summary is None:
+                continue
+            lo, hi, ahead = summary
+            if ahead:
+                verdict = "in every reading the ankle is in front of the pelvis centre"
+            else:
+                verdict = ("the ankle is not always in front of the pelvis centre: "
+                           "even the direction depends on the frame read")
+            print(f"- {name.capitalize()} leg: between {lo:.0f} and {hi:.0f} % of leg length, "
+                  f"depending on the frame read; {verdict}.")
+
+        if high_fps:
+            print(f"  Read {loading_delay_frames(fps)} frames after touchdown.")
+        else:
+            print("  At this frame rate the exact value depends on the frame chosen (the ankle "
+                  "moves backwards relative to the body during stance), so it is given as a "
+                  "range between 1 and 3 frames after touchdown. The tibia angle is not shown "
+                  "because it is not stable with this recording.")
+        print("  The reference is the midpoint between the two hips; the article instead asks "
+              "whether the line through the ankle bone falls within the pelvis, and the width "
+              "of the pelvis cannot be measured in this view: a small positive value may "
+              "therefore still be 'under the pelvis'. The article also warns that this measure "
+              "ignores trunk lean and works less well for midfoot and forefoot strikers, and "
+              "that it should be judged together with other measures.")
+
+    # Left / right differences
+    print("\nDIFFERENCES BETWEEN LEGS")
+    if len(usable) < 2:
+        print("- Not comparable: enough valid strikes are needed for both legs.")
+    else:
+        pairs = [("Knee flexion at touchdown", "flex_touchdown", "°"),
+                 ("Peak knee flexion in stance", "peak_flexion", "°")]
+        if high_fps:
+            pairs += [("Ankle relative to pelvis", "landing", "% of leg length"),
+                      ("Tibia angle", "tibia", "°")]
+        found = [compare_legs(label, usable["left"][key], usable["right"][key], unit)
+                 for label, key, unit in pairs]
+        found = [s for s in found if s]
+        if found:
+            for sentence in found:
+                print(f"- {sentence}")
+            print("  A difference may be real or due to the recording: the leg closest to the "
+                  "camera is tracked better and perspective distorts the measures. To find out, "
+                  "repeat the video filmed from the opposite side: if the difference follows "
+                  "the leg closest to the camera, it is probably a recording effect.")
+        else:
+            print("- No clear difference: the middle halves of the left and right values overlap.")
+
+    # Filming advice, only when something was limited
+    if limits:
+        print("\nFILMING TIPS (from the article)")
+        print("- Fixed camera, at a fixed angle perpendicular to the running direction.")
+        print("- 120 frames per second or more (slow-motion mode on a phone).")
+        print("- Whole body always in frame, tight-fitting clothing.")
+        print("- On a treadmill: run 6-10 minutes before filming, at the speed of a long run.")
+        print(f"- At least {MIN_DURATION_S:.0f}-15 seconds of continuous running.")
+
+
 def main():
-    video = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("data/input/run.mp4")
+    args = sys.argv[1:]
+    video = Path(args[0]) if args else Path("data/input/run.mp4")
+    speed_kmh = None
+    if len(args) > 1:
+        try:
+            speed_kmh = float(args[1].replace(",", "."))
+        except ValueError:
+            print(f"The speed must be a number in km/h, got: {args[1]}")
+            return
     if not video.is_file():
         print(f"Video not found: {video}")
         return
@@ -264,13 +508,10 @@ def main():
     direction = running_direction(points)
 
     print(f"Video: {duration:.1f}s at {fps:.0f} fps")
-    if fps < 100:
-        print(f"  note: at this frame rate one frame is {1000 / fps:.0f} ms, so event timing is coarse "
-              "(the paper recommends 120 fps or more)")
     print(f"Running direction: towards the {'right' if direction == 1 else 'left'} of the image")
     print(f"Foot strikes: {len(left_td)} left, {len(right_td)} right")
 
-    # ------------------------------- whole body --------------------------------
+    # Whole body
     print("\nWhole body")
     cadence, used, discarded = cadence_from_strides([left_td, right_td], fps)
     if used:
@@ -278,79 +519,31 @@ def main():
     else:
         print("  Too few foot strikes detected to compute cadence.")
 
-    both_lengths = [leg_length(points, "l"), leg_length(points, "r")]
-    mean_length = float(np.nanmean(both_lengths))
-
+    mean_length = float(np.nanmean([leg_length(points, "l"), leg_length(points, "r")]))
     all_td = np.sort(np.concatenate([left_td, right_td]))
+    osc = []
     if len(all_td) >= 2:
-        report("Vertical oscillation of the pelvis",
-               vertical_oscillation(points, fps, all_td, mean_length),
-               "% of leg length", decimals=1, what="steps")
+        osc = vertical_oscillation(points, fps, all_td, mean_length)
+        report("Vertical oscillation of the pelvis", osc, "% of leg length",
+               decimals=1, what="steps")
+    trunk = trunk_lean_series(points, direction)
+    report("Trunk lean (forward = positive)", trunk, "deg", what="frames")
 
-    report("Trunk lean (forward = positive)", trunk_lean_series(points, direction),
-           "deg", what="frames")
-
-    # -------------------------------- per leg ----------------------------------
-    for foot, label, td, off in (("l", "Left", left_td, left_off),
-                                 ("r", "Right", right_td, right_off)):
-        print(f"\n{label} leg")
-
-        # Ground contact time in ms; values outside 100-500 ms are detection errors
-        contact = np.array([(b - a) / fps * 1000 for a, b in zip(td, off)])
-        plausible = (contact >= 100) & (contact <= 500)
-        if (~plausible).any():
-            bad = [f"{a / fps:.1f}s ({(b - a) / fps * 1000:.0f} ms)"
-                   for a, b, ok in zip(td, off, plausible) if not ok]
-            print(f"  {int((~plausible).sum())} of {len(td)} strikes discarded "
-                  f"(implausible stance window) at: {', '.join(bad)}")
-
-        td_ok, off_ok = td[plausible], off[plausible]
-        length = leg_length(points, foot)
-
-        # Knee flexion (0 deg = straight leg), the convention used in the paper
-        flex_touchdown = [180 - knee_angle_at(points, f, foot) for f in td_ok]
-        peak_flexion = []
-        for a, b in zip(td_ok, off_ok):
-            angles = [knee_angle_at(points, f, foot) for f in range(a, b + 1)]
-            angles = [x for x in angles if not np.isnan(x)]
-            peak_flexion.append(180 - min(angles) if angles else float("nan"))
-        excursion = np.array(peak_flexion) - np.array(flex_touchdown)
-
-        report("Knee flexion at touchdown", flex_touchdown, "deg")
-        report("Knee peak flexion in stance", peak_flexion, "deg")
-        report("Knee excursion (touchdown to peak)", excursion, "deg")
-
-        # Overstride and tibia angle, both read at the loading response
-        lr = [loading_frame(a, b, fps) for a, b in zip(td_ok, off_ok)]
-        landing = np.array([landing_offset(points, f, foot, direction, length) for f in lr])
-        tibia = np.array([tibia_angle(points, f, foot, direction) for f in lr])
-
-        report("Ankle vs pelvis at loading response", landing * 100, "% of leg length")
-        valid = landing[~np.isnan(landing)]
-        if len(valid):
-            ahead = 100 * np.mean(valid > PELVIS_HALF_BAND)
-            print(f"  Ankle in front of the pelvis zone: {ahead:.0f}% of {len(valid)} strikes "
-                  f"(zone = +/-{PELVIS_HALF_BAND * 100:.0f}% of leg length around the hip midpoint)")
-
-        report("Tibia angle at loading response (knee in front = positive)", tibia, "deg")
-        t = tibia[~np.isnan(tibia)]
-        if len(t):
-            flexed = 100 * np.mean(t > VERTICAL_TIBIA_TOL_DEG)
-            extended = 100 * np.mean(t < -VERTICAL_TIBIA_TOL_DEG)
-            print(f"  Tibia: {extended:.0f}% extended, {100 - flexed - extended:.0f}% vertical, "
-                  f"{flexed:.0f}% flexed (vertical = within +/-{VERTICAL_TIBIA_TOL_DEG:.0f} deg)")
-
-        print("  Sensitivity to the loading frame (landing vs pelvis, tibia angle):")
-        for k, land, tib in sensitivity(points, td_ok, off_ok, foot, direction, length):
-            print(f"    +{k} frame: {land:.0f} % of leg length, {tib:.0f} deg")
-
-    print("\nThese are measurements, not a diagnosis: the paper itself gives no normal/abnormal cut-offs.")
-
+    # Per leg
+    legs = {
+        "left": analyze_leg(points, fps, "l", left_td, left_off, direction),
+        "right": analyze_leg(points, fps, "r", right_td, right_off, direction),
+    }
+    print_details("Left", legs["left"])
+    print_details("Right", legs["right"])
 
     # Save a copy of the video with the skeleton and the touchdown frames marked
     out_path = Path("data/output") / f"{video.stem}_skeleton.mp4"
     render_skeleton(video, out_path, fps, points, left_td, right_td)
-    print(f"Skeleton video saved to: {out_path}")
+    print(f"\nSkeleton video saved to: {out_path}")
+
+    print_report(fps, duration, speed_kmh, cadence if used else float("nan"),
+                 osc, trunk, legs)
 
 
 if __name__ == "__main__":
