@@ -117,6 +117,46 @@ def knee_angle_at(points, f, foot):
         return float("nan")
     return joint_angle(hip, knee, ankle)
 
+def running_direction(points):
+    """Return +1 if the runner faces the right of the image, -1 if the left.
+
+    The toe is always ahead of the heel in the direction of travel, so the sign of
+    (toe x - heel x), as a median over all frames and both feet, gives the direction.
+    """
+    diffs = []
+    for foot in ("l", "r"):
+        heel_x = points[:, NAMES.index(f"{foot}_heel"), 0]
+        toe_x = points[:, NAMES.index(f"{foot}_toe"), 0]
+        diffs.append(toe_x - heel_x)
+    return 1 if np.nanmedian(np.concatenate(diffs)) >= 0 else -1
+
+
+def leg_length(points, foot):
+    """Median thigh + shank length in pixels over the whole video.
+
+    The median makes it robust to the occasional wrong detection.
+    """
+    hip = points[:, NAMES.index(f"{foot}_hip")]
+    knee = points[:, NAMES.index(f"{foot}_knee")]
+    ankle = points[:, NAMES.index(f"{foot}_ankle")]
+    lengths = np.linalg.norm(hip - knee, axis=1) + np.linalg.norm(knee - ankle, axis=1)
+    return float(np.nanmedian(lengths))
+
+
+def overstride_at(points, f, foot, direction, length):
+    """Horizontal distance from pelvis centre to ankle at frame f, as a fraction of leg length.
+
+    Positive = the foot lands in front of the pelvis, in the running direction.
+    Returns NaN if a landmark is missing.
+    """
+    l_hip_x = points[f, NAMES.index("l_hip"), 0]
+    r_hip_x = points[f, NAMES.index("r_hip"), 0]
+    ankle_x = points[f, NAMES.index(f"{foot}_ankle"), 0]
+    if np.isnan([l_hip_x, r_hip_x, ankle_x]).any():
+        return float("nan")
+    pelvis_x = (l_hip_x + r_hip_x) / 2
+    return direction * (ankle_x - pelvis_x) / length
+
 
 def summarize(values):
     """Return (median, 25th percentile, 75th percentile, count), ignoring NaN.
@@ -160,6 +200,10 @@ def main():
     else:
         print("Too few foot strikes detected to compute cadence.")
 
+    # Direction of travel, needed to tell "in front of the pelvis" from "behind"
+    direction = running_direction(points)
+    print(f"Running direction: towards the {'right' if direction == 1 else 'left'} of the image")
+
         # Per-leg measurements
     for foot, label, td, off in (("l", "Left", left_td, left_off),
                                  ("r", "Right", right_td, right_off)):
@@ -187,6 +231,10 @@ def main():
             peak_flexion.append(min(angles) if angles else float("nan"))
 
         report(f"{label} knee at touchdown", at_touchdown, "deg")
+                # Foot landing position relative to the pelvis, as % of leg length
+        length = leg_length(points, foot)
+        landing = [overstride_at(points, f, foot, direction, length) * 100 for f in td_ok]
+        report(f"{label} foot landing vs pelvis", landing, "% of leg length")
         report(f"{label} knee peak flexion in stance", peak_flexion, "deg")
         report(f"{label} contact time", contact[plausible], "ms")
         if (~plausible).any():
