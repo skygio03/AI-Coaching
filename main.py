@@ -219,6 +219,16 @@ def vertical_oscillation(points, fps, all_touchdowns, length):
         values.append((segment.max() - segment.min()) / length * 100)
     return values
 
+def sensitivity(points, td_ok, off_ok, foot, direction, length):
+    """Median landing offset and tibia angle if the loading frame is 1, 2 or 3 frames
+    after touchdown. A large spread means the measure depends on timing, not on form."""
+    rows = []
+    for k in (1, 2, 3):
+        frames = [min(a + k, b) for a, b in zip(td_ok, off_ok)]
+        land = [landing_offset(points, f, foot, direction, length) * 100 for f in frames]
+        tib = [tibia_angle(points, f, foot, direction) for f in frames]
+        rows.append((k, float(np.nanmedian(land)), float(np.nanmedian(tib))))
+    return rows
 
 # --------------------------------- reporting ----------------------------------
 
@@ -330,7 +340,12 @@ def main():
             print(f"  Tibia: {extended:.0f}% extended, {100 - flexed - extended:.0f}% vertical, "
                   f"{flexed:.0f}% flexed (vertical = within +/-{VERTICAL_TIBIA_TOL_DEG:.0f} deg)")
 
+        print("  Sensitivity to the loading frame (landing vs pelvis, tibia angle):")
+        for k, land, tib in sensitivity(points, td_ok, off_ok, foot, direction, length):
+            print(f"    +{k} frame: {land:.0f} % of leg length, {tib:.0f} deg")
+
     print("\nThese are measurements, not a diagnosis: the paper itself gives no normal/abnormal cut-offs.")
+
 
     # Save a copy of the video with the skeleton and the touchdown frames marked
     out_path = Path("data/output") / f"{video.stem}_skeleton.mp4"
