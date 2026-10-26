@@ -1,13 +1,15 @@
-"""Analyze a running video (side view): cadence, stride mechanics and posture."""
+"""Running analysis (side view): cadence, stride mechanics and posture."""
 
+import contextlib
+import io
 import sys
 from pathlib import Path
 
 import numpy as np
 from scipy.signal import find_peaks, savgol_filter
 
-from src.pose_extractor import extract_landmarks, NAMES
-from src.render import render_skeleton
+from src.common.pose_extractor import extract_landmarks, NAMES
+from src.common.render import render_skeleton, to_h264
 
 # ---------------------------------------------------------------------------
 # Settings. Values marked "assumption" are my own choices, NOT taken from the
@@ -352,21 +354,25 @@ def compare_legs(label, left_values, right_values, unit):
             f"({max(ml, mr):.0f} vs {min(ml, mr):.0f} {unit}).")
 
 
-def print_report(fps, duration, speed_kmh, cadence, osc, trunk, legs):
-    """Print a plain-language summary. `legs` is {"left": leg_dict, "right": leg_dict}.
+def build_report(fps, duration, speed_kmh, cadence, osc, trunk, legs):
+    """Build the plain-language report as a list of (title, lines) sections.
 
-    Only measures that are reliable enough are shown as exact results; at low frame
-    rates the foot landing position is shown as a range, and the tibia angle is left out.
+    Lines starting with "- " are bullet points; any other line is an explanatory note.
+    `legs` is {"left": leg_dict, "right": leg_dict}. Only measures that are reliable
+    enough are shown as exact results; at low frame rates the foot landing position
+    is shown as a range, and the tibia angle is left out.
     """
-    bar = "=" * 64
-    print(f"\n{bar}\nREPORT\n{bar}")
+    sections = []
+
     speed = f"{speed_kmh:g} km/h" if speed_kmh else "not provided"
-    print(f"Video: {duration:.1f} s at {fps:.0f} fps | running speed: {speed}")
-    print("These are measurements, not a diagnosis: the article 'An Evidence-Based "
-          "Videotaped Running Biomechanics Analysis' gives no cut-off values between "
-          "normal and abnormal.")
-    print("'from X to Y' is the middle half of the strikes, i.e. how much the measure "
-          "varies from step to step.")
+    sections.append(("REPORT", [
+        f"Video: {duration:.1f} s at {fps:.0f} fps | running speed: {speed}",
+        "These are measurements, not a diagnosis: the article 'An Evidence-Based "
+        "Videotaped Running Biomechanics Analysis' gives no cut-off values between "
+        "normal and abnormal.",
+        "'from X to Y' is the middle half of the strikes, i.e. how much the measure "
+        "varies from step to step.",
+    ]))
 
     high_fps = fps >= MIN_FPS_FOR_EVENT_MEASURES
     usable = {n: leg for n, leg in legs.items() if leg["strikes_used"] >= MIN_STRIKES_PER_LEG}
@@ -385,46 +391,45 @@ def print_report(fps, duration, speed_kmh, cadence, osc, trunk, legs):
             limits.append(f"{name.capitalize()} leg: only {leg['strikes_used']} usable strikes "
                           f"(at least {MIN_STRIKES_PER_LEG} are needed), so it is not summarized.")
     if limits:
-        print("\nANALYSIS LIMITS")
-        for text in limits:
-            print(f"- {text}")
+        sections.append(("ANALYSIS LIMITS", [f"- {text}" for text in limits]))
 
     # Whole body
-    print("\nWHOLE BODY")
+    body = []
     if not np.isnan(cadence):
-        print(f"- Cadence: {cadence:.0f} steps/min. There is no ideal cadence for everyone: "
-              "the article notes that the roughly 180 steps/min often quoted comes from "
-              "running-economy studies rather than injury studies, and that raising cadence "
-              "by about 10% is associated with less vertical oscillation and lower knee loads.")
+        body.append(f"- Cadence: {cadence:.0f} steps/min. There is no ideal cadence for everyone: "
+                    "the article notes that the roughly 180 steps/min often quoted comes from "
+                    "running-economy studies rather than injury studies, and that raising cadence "
+                    "by about 10% is associated with less vertical oscillation and lower knee loads.")
     if summarize(osc)[3]:
-        print(f"- Vertical oscillation of the pelvis: {fmt(osc, 1)} % of leg length. "
-              "According to the article, a larger vertical excursion is associated with "
-              "higher impact and braking forces. There are no cut-off values: it is mainly "
-              "useful for comparing videos filmed the same way.")
+        body.append(f"- Vertical oscillation of the pelvis: {fmt(osc, 1)} % of leg length. "
+                    "According to the article, a larger vertical excursion is associated with "
+                    "higher impact and braking forces. There are no cut-off values: it is mainly "
+                    "useful for comparing videos filmed the same way.")
     med, lo, hi, n = summarize(trunk)
     if n:
-        print(f"- Trunk lean: {med:.0f}° (positive = leaning forward; from {lo:.0f} to {hi:.0f}). "
-              "It also depends on how level the camera is; according to the article, the "
-              "evidence on which trunk lean is preferable is still limited.")
+        body.append(f"- Trunk lean: {med:.0f}° (positive = leaning forward; from {lo:.0f} to {hi:.0f}). "
+                    "It also depends on how level the camera is; according to the article, the "
+                    "evidence on which trunk lean is preferable is still limited.")
+    if body:
+        sections.append(("WHOLE BODY", body))
 
     # Knee
     if usable:
-        print("\nKNEE (flexion: 0° = straight leg)")
-        for name, leg in usable.items():
-            print(f"- {name.capitalize()} leg: at touchdown {fmt(leg['flex_touchdown'])}°, "
-                  f"peak in stance {fmt(leg['peak_flexion'])}°")
-        print("  The article states that peak knee flexion in stance approaches about 45° on "
-              "average and that much lower values may suggest reduced shock absorption, but "
-              "it gives no cut-offs. Estimates from 2D video are approximate.")
+        lines = [f"- {name.capitalize()} leg: at touchdown {fmt(leg['flex_touchdown'])}°, "
+                 f"peak in stance {fmt(leg['peak_flexion'])}°" for name, leg in usable.items()]
+        lines.append("  The article states that peak knee flexion in stance approaches about 45° on "
+                     "average and that much lower values may suggest reduced shock absorption, but "
+                     "it gives no cut-offs. Estimates from 2D video are approximate.")
+        sections.append(("KNEE (flexion: 0° = straight leg)", lines))
 
     # Foot position at touchdown: always shown, but at low frame rates only as a range
     if usable:
-        print("\nFOOT POSITION AT LANDING (read together with the other measures)")
+        lines = []
         for name, leg in usable.items():
             if high_fps:
-                print(f"- {name.capitalize()} leg: ankle relative to pelvis {fmt(leg['landing'])} % "
-                      f"of leg length (positive = in front); tibia angle {fmt(leg['tibia'])}° "
-                      f"(positive = knee in front of the ankle)")
+                lines.append(f"- {name.capitalize()} leg: ankle relative to pelvis {fmt(leg['landing'])} % "
+                             f"of leg length (positive = in front); tibia angle {fmt(leg['tibia'])}° "
+                             f"(positive = knee in front of the ankle)")
                 continue
             summary = landing_summary(leg)
             if summary is None:
@@ -435,27 +440,27 @@ def print_report(fps, duration, speed_kmh, cadence, osc, trunk, legs):
             else:
                 verdict = ("the ankle is not always in front of the pelvis centre: "
                            "even the direction depends on the frame read")
-            print(f"- {name.capitalize()} leg: between {lo:.0f} and {hi:.0f} % of leg length, "
-                  f"depending on the frame read; {verdict}.")
+            lines.append(f"- {name.capitalize()} leg: between {lo:.0f} and {hi:.0f} % of leg length, "
+                         f"depending on the frame read; {verdict}.")
 
         if high_fps:
-            print(f"  Read {loading_delay_frames(fps)} frames after touchdown.")
+            lines.append(f"  Read {loading_delay_frames(fps)} frames after touchdown.")
         else:
-            print("  At this frame rate the exact value depends on the frame chosen (the ankle "
-                  "moves backwards relative to the body during stance), so it is given as a "
-                  "range between 1 and 3 frames after touchdown. The tibia angle is not shown "
-                  "because it is not stable with this recording.")
-        print("  The reference is the midpoint between the two hips; the article instead asks "
-              "whether the line through the ankle bone falls within the pelvis, and the width "
-              "of the pelvis cannot be measured in this view: a small positive value may "
-              "therefore still be 'under the pelvis'. The article also warns that this measure "
-              "ignores trunk lean and works less well for midfoot and forefoot strikers, and "
-              "that it should be judged together with other measures.")
+            lines.append("  At this frame rate the exact value depends on the frame chosen (the ankle "
+                         "moves backwards relative to the body during stance), so it is given as a "
+                         "range between 1 and 3 frames after touchdown. The tibia angle is not shown "
+                         "because it is not stable with this recording.")
+        lines.append("  The reference is the midpoint between the two hips; the article instead asks "
+                     "whether the line through the ankle bone falls within the pelvis, and the width "
+                     "of the pelvis cannot be measured in this view: a small positive value may "
+                     "therefore still be 'under the pelvis'. The article also warns that this measure "
+                     "ignores trunk lean and works less well for midfoot and forefoot strikers, and "
+                     "that it should be judged together with other measures.")
+        sections.append(("FOOT POSITION AT LANDING (read together with the other measures)", lines))
 
     # Left / right differences
-    print("\nDIFFERENCES BETWEEN LEGS")
     if len(usable) < 2:
-        print("- Not comparable: enough valid strikes are needed for both legs.")
+        lines = ["- Not comparable: enough valid strikes are needed for both legs."]
     else:
         pairs = [("Knee flexion at touchdown", "flex_touchdown", "°"),
                  ("Peak knee flexion in stance", "peak_flexion", "°")]
@@ -466,26 +471,134 @@ def print_report(fps, duration, speed_kmh, cadence, osc, trunk, legs):
                  for label, key, unit in pairs]
         found = [s for s in found if s]
         if found:
-            for sentence in found:
-                print(f"- {sentence}")
-            print("  A difference may be real or due to the recording: the leg closest to the "
-                  "camera is tracked better and perspective distorts the measures. To find out, "
-                  "repeat the video filmed from the opposite side: if the difference follows "
-                  "the leg closest to the camera, it is probably a recording effect.")
+            lines = [f"- {sentence}" for sentence in found]
+            lines.append("  A difference may be real or due to the recording: the leg closest to the "
+                         "camera is tracked better and perspective distorts the measures. To find out, "
+                         "repeat the video filmed from the opposite side: if the difference follows "
+                         "the leg closest to the camera, it is probably a recording effect.")
         else:
-            print("- No clear difference: the middle halves of the left and right values overlap.")
+            lines = ["- No clear difference: the middle halves of the left and right values overlap."]
+    sections.append(("DIFFERENCES BETWEEN LEGS", lines))
 
     # Filming advice, only when something was limited
     if limits:
-        print("\nFILMING TIPS (from the article)")
-        print("- Fixed camera, at a fixed angle perpendicular to the running direction.")
-        print("- 120 frames per second or more (slow-motion mode on a phone).")
-        print("- Whole body always in frame, tight-fitting clothing.")
-        print("- On a treadmill: run 6-10 minutes before filming, at the speed of a long run.")
-        print(f"- At least {MIN_DURATION_S:.0f}-15 seconds of continuous running.")
+        sections.append(("FILMING TIPS (from the article)", [
+            "- Fixed camera, at a fixed angle perpendicular to the running direction.",
+            "- 120 frames per second or more (slow-motion mode on a phone).",
+            "- Whole body always in frame, tight-fitting clothing.",
+            "- On a treadmill: run 6-10 minutes before filming, at the speed of a long run.",
+            f"- At least {MIN_DURATION_S:.0f}-15 seconds of continuous running.",
+        ]))
+
+    return sections
+
+
+def report_to_text(sections):
+    """Format the sections of build_report() as plain text (for the terminal or a .txt file)."""
+    bar = "=" * 64
+    lines = []
+    for i, (title, body) in enumerate(sections):
+        if i == 0:
+            lines += [bar, title, bar]
+        else:
+            lines += ["", title]
+        lines += body
+    return "\n".join(lines)
+
+
+# ----------------------------------- the analysis -------------------------------
+
+def analyze_video(video, speed_kmh=None, output_dir="data/output"):
+    """Run the full running analysis on one video.
+
+    Returns a dict with:
+      sections       the report, as a list of (title, lines) sections
+      report_text    the same report as plain text
+      details        the technical numbers, as text
+      skeleton_path  path of the video with the skeleton drawn on it
+      fps, duration  properties of the video
+
+    Raises FileNotFoundError or ValueError (with a readable message) if the video
+    cannot be analyzed.
+    """
+    video = Path(video)
+    if not video.is_file():
+        raise FileNotFoundError(f"Video not found: {video}")
+
+    # Everything printed here is kept as the "technical details" text
+    details = io.StringIO()
+    with contextlib.redirect_stdout(details):
+        fps, points = extract_landmarks(video)
+        if len(points) == 0 or not np.isfinite(fps) or fps <= 0:
+            raise ValueError("Could not read any frame from the video.")
+        duration = len(points) / fps
+        if duration < 2:
+            raise ValueError("The video is too short: at least a few seconds of running are needed.")
+        detected = float(np.mean(~np.isnan(points).all(axis=(1, 2))))
+        if detected < 0.5:
+            raise ValueError(f"The runner was detected in only {detected:.0%} of the frames. "
+                             "Make sure the whole body is visible and the lighting is good.")
+
+        left_td, left_off = detect_strikes(points, fps, "l")
+        right_td, right_off = detect_strikes(points, fps, "r")
+        direction = running_direction(points)
+
+        print(f"Video: {duration:.1f}s at {fps:.0f} fps")
+        print(f"Running direction: towards the {'right' if direction == 1 else 'left'} of the image")
+        print(f"Runner detected in {detected:.0%} of the frames")
+        print(f"Foot strikes: {len(left_td)} left, {len(right_td)} right")
+
+        # Whole body
+        print("\nWhole body")
+        cadence, used, discarded = cadence_from_strides([left_td, right_td], fps)
+        if used:
+            print(f"  Cadence: {cadence:.0f} steps/min (from {used} strides, {discarded} discarded)")
+        else:
+            print("  Too few foot strikes detected to compute cadence.")
+
+        mean_length = float(np.nanmean([leg_length(points, "l"), leg_length(points, "r")]))
+        all_td = np.sort(np.concatenate([left_td, right_td]))
+        osc = []
+        if len(all_td) >= 2:
+            osc = vertical_oscillation(points, fps, all_td, mean_length)
+            report("Vertical oscillation of the pelvis", osc, "% of leg length",
+                   decimals=1, what="steps")
+        trunk = trunk_lean_series(points, direction)
+        report("Trunk lean (forward = positive)", trunk, "deg", what="frames")
+
+        # Per leg
+        legs = {
+            "left": analyze_leg(points, fps, "l", left_td, left_off, direction),
+            "right": analyze_leg(points, fps, "r", right_td, right_off, direction),
+        }
+        print_details("Left", legs["left"])
+        print_details("Right", legs["right"])
+
+    # Video with the skeleton and the touchdown frames marked. OpenCV writes a format that
+    # browsers often cannot play, so it is re-encoded as H.264 when possible
+    out_dir = Path(output_dir)
+    raw_path = out_dir / f"{video.stem}_skeleton_raw.mp4"
+    final_path = out_dir / f"{video.stem}_skeleton.mp4"
+    render_skeleton(video, raw_path, fps, points, left_td, right_td)
+    if to_h264(raw_path, final_path):
+        raw_path.unlink()
+    else:
+        raw_path.replace(final_path)
+
+    sections = build_report(fps, duration, speed_kmh, cadence if used else float("nan"),
+                            osc, trunk, legs)
+    return {
+        "sections": sections,
+        "report_text": report_to_text(sections),
+        "details": details.getvalue(),
+        "skeleton_path": final_path,
+        "fps": fps,
+        "duration": duration,
+    }
 
 
 def main():
+    """Command-line use: python -m src.sports.running VIDEO [SPEED_KMH]"""
     args = sys.argv[1:]
     video = Path(args[0]) if args else Path("data/input/run.mp4")
     speed_kmh = None
@@ -495,55 +608,17 @@ def main():
         except ValueError:
             print(f"The speed must be a number in km/h, got: {args[1]}")
             return
-    if not video.is_file():
-        print(f"Video not found: {video}")
+
+    print("Analyzing the video (this can take a minute)...")
+    try:
+        result = analyze_video(video, speed_kmh)
+    except (FileNotFoundError, ValueError) as error:
+        print(error)
         return
 
-    print("Extracting landmarks (this can take a minute)...")
-    fps, points = extract_landmarks(video)
-    duration = len(points) / fps
-
-    left_td, left_off = detect_strikes(points, fps, "l")
-    right_td, right_off = detect_strikes(points, fps, "r")
-    direction = running_direction(points)
-
-    print(f"Video: {duration:.1f}s at {fps:.0f} fps")
-    print(f"Running direction: towards the {'right' if direction == 1 else 'left'} of the image")
-    print(f"Foot strikes: {len(left_td)} left, {len(right_td)} right")
-
-    # Whole body
-    print("\nWhole body")
-    cadence, used, discarded = cadence_from_strides([left_td, right_td], fps)
-    if used:
-        print(f"  Cadence: {cadence:.0f} steps/min (from {used} strides, {discarded} discarded)")
-    else:
-        print("  Too few foot strikes detected to compute cadence.")
-
-    mean_length = float(np.nanmean([leg_length(points, "l"), leg_length(points, "r")]))
-    all_td = np.sort(np.concatenate([left_td, right_td]))
-    osc = []
-    if len(all_td) >= 2:
-        osc = vertical_oscillation(points, fps, all_td, mean_length)
-        report("Vertical oscillation of the pelvis", osc, "% of leg length",
-               decimals=1, what="steps")
-    trunk = trunk_lean_series(points, direction)
-    report("Trunk lean (forward = positive)", trunk, "deg", what="frames")
-
-    # Per leg
-    legs = {
-        "left": analyze_leg(points, fps, "l", left_td, left_off, direction),
-        "right": analyze_leg(points, fps, "r", right_td, right_off, direction),
-    }
-    print_details("Left", legs["left"])
-    print_details("Right", legs["right"])
-
-    # Save a copy of the video with the skeleton and the touchdown frames marked
-    out_path = Path("data/output") / f"{video.stem}_skeleton.mp4"
-    render_skeleton(video, out_path, fps, points, left_td, right_td)
-    print(f"\nSkeleton video saved to: {out_path}")
-
-    print_report(fps, duration, speed_kmh, cadence if used else float("nan"),
-                 osc, trunk, legs)
+    print(result["details"])
+    print(f"Skeleton video saved to: {result['skeleton_path']}\n")
+    print(result["report_text"])
 
 
 if __name__ == "__main__":

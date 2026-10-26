@@ -1,4 +1,3 @@
-# here it will be the code of MediaPipe
 """Extract body landmarks from a video using MediaPipe Pose."""
 
 import cv2

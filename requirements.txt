@@ -1,5 +1,9 @@
-# useful libraries
+# Pose estimation and video
 mediapipe==0.10.14
 opencv-contrib-python==4.10.0.84
 numpy==1.26.4
 scipy
+imageio-ffmpeg
+
+# Web interface
+streamlit

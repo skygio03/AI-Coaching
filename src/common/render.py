@@ -1,11 +1,12 @@
 """Draw the detected skeleton on a video and save the result."""
 
+import subprocess
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-from src.pose_extractor import NAMES
+from src.common.pose_extractor import NAMES
 
 # Pairs of landmarks joined by a line
 EDGES = [
@@ -95,3 +96,25 @@ def render_skeleton(video_path, out_path, fps, points, strikes_left, strikes_rig
     cap.release()
     if writer is not None:
         writer.release()
+
+
+def to_h264(src_path, dst_path):
+    """Re-encode a video as H.264 so that web browsers can play it. Return True on success.
+
+    OpenCV writes MPEG-4 Part 2 ("mp4v"), which most browsers cannot play.
+    The ffmpeg binary comes from the imageio-ffmpeg package.
+    """
+    try:
+        import imageio_ffmpeg
+
+        result = subprocess.run(
+            [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-i", str(src_path),
+             # H.264 with yuv420p needs even width and height
+             "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+             "-vcodec", "libx264", "-pix_fmt", "yuv420p",
+             "-preset", "veryfast", "-crf", "23", "-an", str(dst_path)],
+            capture_output=True,
+        )
+        return result.returncode == 0 and Path(dst_path).is_file()
+    except Exception:
+        return False
