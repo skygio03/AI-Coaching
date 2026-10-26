@@ -7,6 +7,8 @@ movement and observations you can discuss with a coach or a health professional.
 > very few videos and has not been validated against a reference system, so treat every number
 > as approximate.
 
+**[Try it online](https://ai-coaching-awyt3ladz87argtgwttf3k.streamlit.app/)**
+
 ## What the result looks like
 
 The app draws the detected skeleton on your video, so you can check that the tracking is right
