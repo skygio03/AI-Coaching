@@ -23,6 +23,17 @@ MIN_FPS_FOR_EVENT_MEASURES = 100  # below this, landing and tibia angle depend o
 MIN_STRIKES_PER_LEG = 8           # fewer usable strikes = too little data to summarize a leg
 MIN_DURATION_S = 10.0             # shorter clips give too few steps
 
+# How the video was filmed: label shown in the interface -> internal key
+RECORDING_OPTIONS = {
+    "Treadmill (camera still)": "treadmill",
+    "Outdoors, camera following the runner": "following",
+}
+SPEED_HELP = {
+    "treadmill": "The speed shown on the treadmill display. Leave at 0 if you do not know it.",
+    "following": "From your watch/GPS, or distance divided by time. Leave at 0 if you do not "
+                 "know it.",
+}
+
 
 # ------------------------------- basic helpers -------------------------------
 
@@ -354,19 +365,47 @@ def compare_legs(label, left_values, right_values, unit):
             f"({max(ml, mr):.0f} vs {min(ml, mr):.0f} {unit}).")
 
 
-def build_report(fps, duration, speed_kmh, cadence, osc, trunk, legs):
+def filming_tips(recording="treadmill"):
+    """Return the filming tips for a recording type, as a list of '- ' lines."""
+    if recording == "following":
+        return [
+            "- Keep the whole body in frame and the camera as steady and level as you can, "
+            "at about hip height, looking at the runner from the side.",
+            "- Keep a constant distance from the runner.",
+            "- 120 frames per second or more (slow-motion mode on a phone).",
+            f"- At least {MIN_DURATION_S:.0f}-15 seconds of continuous running at a steady speed, "
+            "tight-fitting clothing, good light.",
+            "- These tips for a moving camera are suggestions of this project, not from the "
+            "article, which describes a fixed camera.",
+        ]
+    return [
+        "- Fixed camera, at a fixed angle perpendicular to the running direction.",
+        "- 120 frames per second or more (slow-motion mode on a phone).",
+        "- Whole body always in frame, tight-fitting clothing, good light.",
+        "- On a treadmill: run 6-10 minutes before filming, at the speed of a long run.",
+        f"- At least {MIN_DURATION_S:.0f}-15 seconds of continuous running.",
+    ]
+
+
+def build_report(fps, duration, speed_kmh, cadence, osc, trunk, legs, recording="treadmill"):
     """Build the plain-language report as a list of (title, lines) sections.
 
     Lines starting with "- " are bullet points; any other line is an explanatory note.
     `legs` is {"left": leg_dict, "right": leg_dict}. Only measures that are reliable
     enough are shown as exact results; at low frame rates the foot landing position
-    is shown as a range, and the tibia angle is left out.
+    is shown as a range, and the tibia angle is left out. `recording` is "treadmill"
+    or "following" (outdoors, camera following the runner).
+
+    The report describes measurements and what the research says. It never tells a
+    runner without a problem to change cadence, foot strike or anything else.
     """
+    following = recording == "following"
     sections = []
 
     speed = f"{speed_kmh:g} km/h" if speed_kmh else "not provided"
+    rec_label = "outdoors, camera following the runner" if following else "treadmill"
     sections.append(("REPORT", [
-        f"Video: {duration:.1f} s at {fps:.0f} fps | running speed: {speed}",
+        f"Video: {duration:.1f} s at {fps:.0f} fps | running speed: {speed} | recording: {rec_label}",
         "These are measurements, not a diagnosis: the article 'An Evidence-Based "
         "Videotaped Running Biomechanics Analysis' gives no cut-off values between "
         "normal and abnormal.",
@@ -379,6 +418,12 @@ def build_report(fps, duration, speed_kmh, cadence, osc, trunk, legs):
 
     # Limits of this particular recording
     limits = []
+    if following:
+        limits.append("Outdoor recording with a moving camera: this mode has not been tested on real "
+                      "videos. Camera movement can affect the detection of foot strikes, and a camera "
+                      "that tilts or changes distance can distort the angles.")
+        limits.append("The vertical oscillation of the pelvis is not reported, because the vertical "
+                      "movement of the camera would add to the runner's own.")
     if duration < MIN_DURATION_S:
         limits.append(f"The video is shorter than {MIN_DURATION_S:.0f} seconds: few steps, "
                       "less stable measures.")
@@ -396,11 +441,9 @@ def build_report(fps, duration, speed_kmh, cadence, osc, trunk, legs):
     # Whole body
     body = []
     if not np.isnan(cadence):
-        body.append(f"- Cadence: {cadence:.0f} steps/min. There is no ideal cadence for everyone: "
-                    "the article notes that the roughly 180 steps/min often quoted comes from "
-                    "running-economy studies rather than injury studies, and that raising cadence "
-                    "by about 10% is associated with less vertical oscillation and lower knee loads.")
-    if summarize(osc)[3]:
+        body.append(f"- Cadence: {cadence:.0f} steps/min (what the research says about it is "
+                    "in a section further down).")
+    if not following and summarize(osc)[3]:
         body.append(f"- Vertical oscillation of the pelvis: {fmt(osc, 1)} % of leg length. "
                     "According to the article, a larger vertical excursion is associated with "
                     "higher impact and braking forces. There are no cut-off values: it is mainly "
@@ -480,15 +523,65 @@ def build_report(fps, duration, speed_kmh, cadence, osc, trunk, legs):
             lines = ["- No clear difference: the middle halves of the left and right values overlap."]
     sections.append(("DIFFERENCES BETWEEN LEGS", lines))
 
+    # What the research says: descriptive statements only, no advice to change anything
+    if not np.isnan(cadence):
+        sections.append(("WHAT THE RESEARCH SAYS ABOUT CADENCE", [
+            "- When runners raised their step rate at the same speed, several biomechanical "
+            "factors associated with running injuries, such as impact loads, decreased (a "
+            "systematic review of 10 studies, almost all with few participants).",
+            "- Whether this prevents injuries has not been established. A 2025 review of 18 "
+            "studies describes cadence retraining as a promising, low-cost strategy that may "
+            "reduce overuse injuries, while a meta-analysis of 37 studies found only 2 studies "
+            "on injury and judged the evidence insufficient on both injury and performance.",
+            "- For running economy, a higher step frequency was only weakly associated with "
+            "better economy (meta-analysis of observational studies).",
+            "- The roughly 180 steps/min often quoted comes mostly from running-economy studies "
+            "rather than injury studies, and there is no cadence that is ideal for everyone. "
+            "Running speed affects running mechanics, so compare videos recorded at the same speed.",
+        ]))
+
+    # What the report does not recommend: always shown
+    sections.append(("WHAT THIS REPORT DOES NOT RECOMMEND", [
+        "- This report does not recommend changing your cadence, your foot strike or any other "
+        "aspect of your running form. If you have no pain or injury, it only describes what was "
+        "measured.",
+        "- A 5-10% increase in cadence appears in the research as part of supervised clinical "
+        "protocols for runners with patellofemoral (kneecap) pain, where a review of reviews "
+        "concluded that it may be a feasible complementary intervention, with feedback that is "
+        "gradually reduced. It is not presented as a recommendation for runners without a problem.",
+        "- This report does not classify your foot strike. For uninjured runners who land on the "
+        "heel, a meta-analysis (Anderson et al., 2020) concluded that changing foot strike cannot "
+        "be recommended: the relationship between foot strike and injury could not be "
+        "determined, and the load shifts towards the ankle and calf. A systematic review (Burke "
+        "et al., 2021) found low evidence of a relationship between foot strike and injuries.",
+        "- If you have pain or an injury, a qualified professional (for example a physiotherapist "
+        "or a sports doctor) can assess you and, if appropriate, supervise changes to your "
+        "running.",
+    ]))
+
     # Filming advice, only when something was limited
     if limits:
-        sections.append(("FILMING TIPS (from the article)", [
-            "- Fixed camera, at a fixed angle perpendicular to the running direction.",
-            "- 120 frames per second or more (slow-motion mode on a phone).",
-            "- Whole body always in frame, tight-fitting clothing.",
-            "- On a treadmill: run 6-10 minutes before filming, at the speed of a long run.",
-            f"- At least {MIN_DURATION_S:.0f}-15 seconds of continuous running.",
-        ]))
+        sections.append(("FILMING TIPS", filming_tips(recording)))
+
+    sections.append(("SOURCES", [
+        "- 'An Evidence-Based Videotaped Running Biomechanics Analysis': framework for the "
+        "measures in this report.",
+        "- Anderson et al. (2020), Sports Medicine: 'What are the Benefits and Risks Associated "
+        "with Changing Foot Strike Pattern During Running? A Systematic Review and Meta-analysis "
+        "of Injury, Running Economy, and Biomechanics'.",
+        "- Burke et al. (2021): 'Risk Factors for Injuries in Runners: A Systematic Review of "
+        "Foot Strike Technique and Its Classification at Impact'.",
+        "- Figueiredo et al. (2025), Cureus: 'The Influence of Running Cadence on Biomechanics "
+        "and Injury Prevention: A Systematic Review'.",
+        "- 'Influence of stride frequency and length on running mechanics: a systematic review', "
+        "Sports Health (2014).",
+        "- 'What is the effect of changing running step rate on injury, performance and "
+        "biomechanics?' (systematic review and meta-analysis).",
+        "- 'Gait retraining for patellofemoral pain in runners: an umbrella review of clinical "
+        "and biomechanical evidence'.",
+        "- 'The relationship between running biomechanics and running economy: a systematic "
+        "review and meta-analysis of observational studies', Sports Medicine (2024).",
+    ]))
 
     return sections
 
@@ -508,8 +601,11 @@ def report_to_text(sections):
 
 # ----------------------------------- the analysis -------------------------------
 
-def analyze_video(video, speed_kmh=None, output_dir="data/output"):
+def analyze_video(video, speed_kmh=None, output_dir="data/output", recording="treadmill"):
     """Run the full running analysis on one video.
+
+    `recording` is "treadmill" (camera still) or "following" (outdoors, camera
+    following the runner).
 
     Returns a dict with:
       sections       the report, as a list of (title, lines) sections
@@ -521,6 +617,10 @@ def analyze_video(video, speed_kmh=None, output_dir="data/output"):
     Raises FileNotFoundError or ValueError (with a readable message) if the video
     cannot be analyzed.
     """
+    if recording not in RECORDING_OPTIONS.values():
+        raise ValueError(f"Unknown recording type: {recording}")
+    following = recording == "following"
+
     video = Path(video)
     if not video.is_file():
         raise FileNotFoundError(f"Video not found: {video}")
@@ -544,6 +644,7 @@ def analyze_video(video, speed_kmh=None, output_dir="data/output"):
         direction = running_direction(points)
 
         print(f"Video: {duration:.1f}s at {fps:.0f} fps")
+        print(f"Recording: {'outdoors, camera following the runner' if following else 'treadmill'}")
         print(f"Running direction: towards the {'right' if direction == 1 else 'left'} of the image")
         print(f"Runner detected in {detected:.0%} of the frames")
         print(f"Foot strikes: {len(left_td)} left, {len(right_td)} right")
@@ -556,13 +657,17 @@ def analyze_video(video, speed_kmh=None, output_dir="data/output"):
         else:
             print("  Too few foot strikes detected to compute cadence.")
 
-        mean_length = float(np.nanmean([leg_length(points, "l"), leg_length(points, "r")]))
-        all_td = np.sort(np.concatenate([left_td, right_td]))
         osc = []
-        if len(all_td) >= 2:
-            osc = vertical_oscillation(points, fps, all_td, mean_length)
-            report("Vertical oscillation of the pelvis", osc, "% of leg length",
-                   decimals=1, what="steps")
+        if following:
+            # The camera's own vertical movement would add to the pelvis movement
+            print("  Vertical oscillation: not computed (moving camera)")
+        else:
+            mean_length = float(np.nanmean([leg_length(points, "l"), leg_length(points, "r")]))
+            all_td = np.sort(np.concatenate([left_td, right_td]))
+            if len(all_td) >= 2:
+                osc = vertical_oscillation(points, fps, all_td, mean_length)
+                report("Vertical oscillation of the pelvis", osc, "% of leg length",
+                       decimals=1, what="steps")
         trunk = trunk_lean_series(points, direction)
         report("Trunk lean (forward = positive)", trunk, "deg", what="frames")
 
@@ -586,7 +691,7 @@ def analyze_video(video, speed_kmh=None, output_dir="data/output"):
         raw_path.replace(final_path)
 
     sections = build_report(fps, duration, speed_kmh, cadence if used else float("nan"),
-                            osc, trunk, legs)
+                            osc, trunk, legs, recording=recording)
     return {
         "sections": sections,
         "report_text": report_to_text(sections),
@@ -598,7 +703,7 @@ def analyze_video(video, speed_kmh=None, output_dir="data/output"):
 
 
 def main():
-    """Command-line use: python -m src.sports.running VIDEO [SPEED_KMH]"""
+    """Command-line use: python -m src.sports.running VIDEO [SPEED_KMH] [treadmill|following]"""
     args = sys.argv[1:]
     video = Path(args[0]) if args else Path("data/input/run.mp4")
     speed_kmh = None
@@ -608,10 +713,14 @@ def main():
         except ValueError:
             print(f"The speed must be a number in km/h, got: {args[1]}")
             return
+    recording = args[2] if len(args) > 2 else "treadmill"
+    if recording not in RECORDING_OPTIONS.values():
+        print(f"The recording type must be one of: {', '.join(RECORDING_OPTIONS.values())}")
+        return
 
     print("Analyzing the video (this can take a minute)...")
     try:
-        result = analyze_video(video, speed_kmh)
+        result = analyze_video(video, speed_kmh, recording=recording)
     except (FileNotFoundError, ValueError) as error:
         print(error)
         return
@@ -623,3 +732,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    

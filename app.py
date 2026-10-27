@@ -53,19 +53,28 @@ st.info("This tool gives measurements and observations, not a medical diagnosis.
 sport_name = st.selectbox("Sport", list(SPORTS))
 sport = SPORTS[sport_name]
 
-with st.expander("How to film yourself (running)"):
-    st.markdown(
-        "- Side view: camera still, at a fixed angle perpendicular to the running direction.\n"
-        "- Whole body always in frame, tight-fitting clothing, good light.\n"
-        "- 120 frames per second or more if possible (slow-motion mode on a phone).\n"
-        "- At least 10-15 seconds of continuous running at a steady speed.\n"
-        "- On a treadmill: run 6-10 minutes before filming, at the speed of a long run."
-    )
+# How the video was filmed (only for sports that define the options)
+recording_options = getattr(sport, "RECORDING_OPTIONS", {})
+recording = None
+if recording_options:
+    recording_label = st.radio("How was the video filmed?", list(recording_options))
+    recording = recording_options[recording_label]
+    if recording == "following":
+        st.warning("Outdoor videos with a moving camera have not been tested yet: treat the "
+                   "results with extra caution. The vertical oscillation is not reported "
+                   "in this mode.")
+
+tips = sport.filming_tips(recording) if hasattr(sport, "filming_tips") else []
+if tips:
+    with st.expander(f"How to film yourself ({sport_name.lower()})"):
+        st.markdown("\n".join(tips))
 
 uploaded = st.file_uploader("Video", type=["mp4", "mov", "m4v", "avi"])
+speed_help = getattr(sport, "SPEED_HELP", {}).get(
+    recording, "Leave at 0 if you do not know it.")
 speed = st.number_input(
     "Running speed (km/h)", min_value=0.0, max_value=40.0, value=0.0, step=0.5,
-    help="Leave at 0 if you do not know it. For now it is only written in the report.",
+    help=speed_help + " For now it is only written in the report.",
 )
 
 if st.button("Analyse", type="primary", disabled=uploaded is None):
@@ -74,9 +83,11 @@ if st.button("Analyse", type="primary", disabled=uploaded is None):
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         video_path = Path(tmp) / f"upload{suffix}"
         video_path.write_bytes(uploaded.getbuffer())
+        options = {"recording": recording} if recording else {}
         with st.spinner("Analysing the video (this can take a minute)..."):
             try:
-                result = sport.analyze_video(video_path, speed or None, output_dir=Path(tmp))
+                result = sport.analyze_video(video_path, speed or None,
+                                             output_dir=Path(tmp), **options)
             except (FileNotFoundError, ValueError) as error:
                 st.error(str(error))
                 st.stop()
