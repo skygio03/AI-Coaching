@@ -114,6 +114,12 @@ if result and st.session_state.get("result_sport") == sport_name:
 
     show_report(result["sections"])
 
+    # Technical numbers, limits and research, for who wants to know more
+    background = result.get("background")
+    if background:
+        with st.expander("Details and research behind this result"):
+            show_report(background)
+
     with st.expander("Technical details"):
         st.code(result["details"], language=None)
     st.download_button("Download the report (.txt)", result["report_text"],
