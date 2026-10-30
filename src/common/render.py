@@ -39,11 +39,18 @@ def _valid(p):
     return not np.isnan(p).any()
 
 
+def _on_side(name, side):
+    """True if a landmark belongs to `side` ('l' or 'r'); always True when side is None."""
+    return side is None or name.startswith(f"{side}_")
+
+
 def render_skeleton(video_path, out_path, fps, points, strikes_left, strikes_right,
-                    flash_frames=6):
+                    flash_frames=6, only_side=None):
     """Write a copy of the video with the skeleton drawn on every frame.
 
-    A ring is drawn around the ankle for a few frames after each detected foot strike.
+    A ring is drawn around the ankle for `flash_frames` frames after each detected event.
+    If `only_side` is 'l' or 'r', only the landmarks and bones of that side are drawn
+    (the other side, the nose and the lines joining the two sides are left out).
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -69,6 +76,8 @@ def render_skeleton(video_path, out_path, fps, points, strikes_left, strikes_rig
 
         # Bones
         for a, b in EDGES:
+            if not (_on_side(a, only_side) and _on_side(b, only_side)):
+                continue
             pa, pb = row[index[a]], row[index[b]]
             if _valid(pa) and _valid(pb):
                 cv2.line(frame, tuple(pa.astype(int)), tuple(pb.astype(int)),
@@ -76,14 +85,18 @@ def render_skeleton(video_path, out_path, fps, points, strikes_left, strikes_rig
 
         # Joints
         for name, k in index.items():
+            if only_side is not None and not _on_side(name, only_side):
+                continue
             if _valid(row[k]):
                 cv2.circle(frame, tuple(row[k].astype(int)), 5, (255, 255, 255), -1)
 
-        # Ring around the ankle for a few frames after each foot strike
-        for strikes, ankle, color, label in (
-            (strikes_left, "l_ankle", LEFT_COLOR, "L"),
-            (strikes_right, "r_ankle", RIGHT_COLOR, "R"),
+        # Ring around the ankle for a few frames after each event
+        for strikes, ankle, color, label, prefix in (
+            (strikes_left, "l_ankle", LEFT_COLOR, "L", "l"),
+            (strikes_right, "r_ankle", RIGHT_COLOR, "R", "r"),
         ):
+            if only_side is not None and prefix != only_side:
+                continue
             if any(0 <= i - s < flash_frames for s in strikes) and _valid(row[index[ankle]]):
                 center = tuple(row[index[ankle]].astype(int))
                 cv2.circle(frame, center, 22, color, 3)
