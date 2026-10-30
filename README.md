@@ -7,6 +7,12 @@ movement and a plain-language report you can discuss with a coach or a health pr
 > few videos and have not been validated against a reference system, so treat every number as
 > approximate.
 
+## Try it online
+
+**[Open the app](https://ai-coaching-awyt3ladz87argtgwttf3k.streamlit.app/)**: choose the sport, upload a side-view video and read the report. The free hosting puts the app to sleep when nobody uses it: if you see a "wake up" button, click it and wait a minute.
+
+Do not upload videos of other people without their permission: uploaded videos are processed on the hosting provider's servers.
+
 ## Sports
 
 | Sport | Camera setup | What the report gives | Details |
@@ -111,6 +117,4 @@ module to the `SPORTS` dictionary in `app.py` and create a `docs/<sport>/README.
 - Only the side view is analysed; nothing is measured from behind or in front.
 - No validation yet against a reference system (for example manual angle measurement or motion
   capture).
-- Videos are processed locally and deleted from the temporary folder when the analysis ends. If
-  you ever host this app online, uploaded videos will contain people: decide what is stored and
-  write a privacy notice first.
+- - Run locally, videos stay on your computer and are deleted from the temporary folder when the analysis ends. In the online version, videos are processed on the hosting provider's servers and the app does not keep them, but the hosting provider's own policy applies.
