@@ -7,10 +7,10 @@ from pathlib import Path
 import streamlit as st
 import streamlit.components.v1 as components
 
-from src.sports import cycling, running
+from src.sports import bench_press, cycling, running, squat
 
 # One entry per supported sport: name shown in the interface -> module with analyze_video()
-SPORTS = {"Running": running, "Cycling": cycling}
+SPORTS = {"Running": running, "Cycling": cycling, "Squat": squat, "Bench press": bench_press}
 
 st.set_page_config(page_title="AI Coaching", layout="centered")
 
@@ -64,6 +64,10 @@ if recording_options:
         st.warning("Outdoor videos with a moving camera have not been tested yet: treat the "
                    "results with extra caution. The vertical oscillation is not reported "
                    "in this mode.")
+
+# A sport can warn that its analysis is new and untested
+if hasattr(sport, "NOTICE"):
+    st.warning(sport.NOTICE)
 
 tips = sport.filming_tips(recording) if hasattr(sport, "filming_tips") else []
 if tips:

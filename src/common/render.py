@@ -45,10 +45,12 @@ def _on_side(name, side):
 
 
 def render_skeleton(video_path, out_path, fps, points, strikes_left, strikes_right,
-                    flash_frames=6, only_side=None):
+                    flash_frames=6, only_side=None, ring_landmark="ankle", ring_label=None):
     """Write a copy of the video with the skeleton drawn on every frame.
 
-    A ring is drawn around the ankle for `flash_frames` frames after each detected event.
+    A ring is drawn around `ring_landmark` (default: the ankle) for `flash_frames` frames
+    after each detected event. The text next to the ring is "L" or "R" unless `ring_label`
+    is given (an empty string draws no text).
     If `only_side` is 'l' or 'r', only the landmarks and bones of that side are drawn
     (the other side, the nose and the lines joining the two sides are left out).
     """
@@ -91,17 +93,20 @@ def render_skeleton(video_path, out_path, fps, points, strikes_left, strikes_rig
                 cv2.circle(frame, tuple(row[k].astype(int)), 5, (255, 255, 255), -1)
 
         # Ring around the ankle for a few frames after each event
-        for strikes, ankle, color, label, prefix in (
-            (strikes_left, "l_ankle", LEFT_COLOR, "L", "l"),
-            (strikes_right, "r_ankle", RIGHT_COLOR, "R", "r"),
+        for strikes, color, label, prefix in (
+            (strikes_left, LEFT_COLOR, "L", "l"),
+            (strikes_right, RIGHT_COLOR, "R", "r"),
         ):
             if only_side is not None and prefix != only_side:
                 continue
-            if any(0 <= i - s < flash_frames for s in strikes) and _valid(row[index[ankle]]):
-                center = tuple(row[index[ankle]].astype(int))
+            target = f"{prefix}_{ring_landmark}"
+            if any(0 <= i - s < flash_frames for s in strikes) and _valid(row[index[target]]):
+                center = tuple(row[index[target]].astype(int))
                 cv2.circle(frame, center, 22, color, 3)
-                cv2.putText(frame, label, (center[0] + 26, center[1]),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
+                text = label if ring_label is None else ring_label
+                if text:
+                    cv2.putText(frame, text, (center[0] + 26, center[1]),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
 
         writer.write(frame)
         i += 1

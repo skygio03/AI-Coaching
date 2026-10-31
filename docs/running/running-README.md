@@ -21,6 +21,28 @@ step, and how reliable they are. The report also summarises research on cadence 
 listing what it does **not** recommend (for example, a universal 180 steps per minute, or changing
 foot strike for every runner).
 
+The report uses the same format as the other sports: **what to do** first (usually "nothing
+clearly breaks a rule backed by research", because there are no cut-off values), then what was
+measured, then **check it yourself** ideas (run tall, a slightly quicker step rate as an
+experiment with a number based on your own cadence, do not force a forefoot landing) and how
+much to trust the result. A tip about differences between the legs appears only when they clearly
+differ, and is labelled as a coach's tip with low certainty. The detailed measures and the
+research are in the expander "Details and research behind this result".
+
+### Research used for the tips
+
+| Tip | Label | Based on |
+|---|---|---|
+| Steps on the slow side for your speed | coach's tip, low certainty | Reference by speed from Fukuchi et al. 2017 (about 162, 171 and 183 steps/min at 9, 12.6 and 16.2 km/h; 28 regular runners, 3D lab). "Slow side" = more than 1 SD below that group: **a choice of this project**, not a cut-off from a paper. Effects of a 5-10% increase: Heiderscheit 2011, Doyle 2022, Huber 2024 |
+| Try quicker, shorter steps | check it yourself | same studies; 2 weeks with a metronome, 2-3 runs a week |
+| Legs move differently | coach's tip, low certainty | symmetry is part of a video check (Vincent 2014); no limit in any paper |
+| Arms swing freely | check it yourself | Arellano & Kram 2014 (3-13% more energy with arms held still) |
+| Land softly and quietly | check it yourself | Petri 2026, Vincent 2014; forefoot change not recommended (Anderson 2020, Burke 2021) |
+| Run tall, do not sit | check it yourself | common coaching advice, not tested in the studies read |
+
+At least 10 usable strikes per leg are needed (Fox et al. 2023: fewer than 10 gait cycles can
+mislead for small effects). The reference step rate needs the running speed to be entered.
+
 ## How to film
 
 Two setups are supported. A still camera on a runner who moves across the frame is not supported.

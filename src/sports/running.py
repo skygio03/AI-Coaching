@@ -8,6 +8,8 @@ from pathlib import Path
 import numpy as np
 from scipy.signal import find_peaks, savgol_filter
 
+from src.common.advice import (CHECK, COACH, Advice, check_section, extra_section,
+                               source_lines, what_to_do_section)
 from src.common.pose_extractor import extract_landmarks, NAMES
 from src.common.render import render_skeleton, to_h264
 
@@ -20,10 +22,17 @@ LOADING_DELAY_S = 0.05   # assumption: loading response happens ~50 ms after tou
 
 # Report rules (all assumptions)
 MIN_FPS_FOR_EVENT_MEASURES = 100  # below this, landing and tibia angle depend on the exact frame
-MIN_STRIKES_PER_LEG = 8           # fewer usable strikes = too little data to summarize a leg
+MIN_STRIKES_PER_LEG = 10          # fewer than 10 gait cycles is unwise for small effects (Fox 2023)
 MIN_DURATION_S = 10.0             # shorter clips give too few steps
 
 # How the video was filmed: label shown in the interface -> internal key
+# Step rate reference by speed: 28 regular runners on a treadmill, 3D motion capture
+# (Fukuchi et al. 2017, Table 4). Strides per minute x 2 = steps per minute, SD x 2.
+# (speed km/h, steps/min, SD). It describes a group, it is NOT a target or a cut-off.
+CADENCE_REFERENCE = ((9.0, 161.6, 9.3), (12.6, 171.4, 10.5), (16.2, 183.5, 13.4))
+LOW_CADENCE_SD = 1.0              # assumption: "on the slow side" = more than 1 SD below the group mean
+STEP_RATE_CHANGE = 0.05           # 5%: the small end of the 5-10% used in the studies
+
 RECORDING_OPTIONS = {
     "Treadmill (camera still)": "treadmill",
     "Outdoors, camera following the runner": "following",
@@ -328,6 +337,20 @@ def print_details(label, leg):
 
 # ---------------------------------- the report ----------------------------------
 
+def reference_cadence(speed_kmh):
+    """Return (mean, sd) in steps/min of the lab reference group at this speed, or None.
+
+    Linear interpolation between the three speeds of the study; None outside 8-17 km/h or
+    when the speed is unknown.
+    """
+    if not speed_kmh or not 8.0 <= speed_kmh <= 17.0:
+        return None
+    speeds = [r[0] for r in CADENCE_REFERENCE]
+    mean = float(np.interp(speed_kmh, speeds, [r[1] for r in CADENCE_REFERENCE]))
+    sd = float(np.interp(speed_kmh, speeds, [r[2] for r in CADENCE_REFERENCE]))
+    return mean, sd
+
+
 def landing_summary(leg):
     """Return (lowest, highest, all_ahead) of the median landing offset over the 1-, 2-
     and 3-frame readings, or None if there is no data.
@@ -362,7 +385,7 @@ def compare_legs(label, left_values, right_values, unit):
         return None
     side = "right" if mr > ml else "left"
     return (f"{label}: higher on the {side} "
-            f"({max(ml, mr):.0f} vs {min(ml, mr):.0f} {unit}).")
+            f"({max(ml, mr):.0f} vs {min(ml, mr):.0f}{unit if unit.startswith('°') else ' ' + unit}).")
 
 
 def filming_tips(recording="treadmill"):
@@ -388,9 +411,11 @@ def filming_tips(recording="treadmill"):
 
 
 def build_report(fps, duration, speed_kmh, cadence, osc, trunk, legs, recording="treadmill"):
-    """Build the plain-language report as a list of (title, lines) sections.
+    """Return (main_sections, background_sections), each a list of (title, lines).
 
     Lines starting with "- " are bullet points; any other line is an explanatory note.
+    The main part is short and in plain language: what to do first, what was measured, what
+    to check alone. The background part holds the numbers, the limits and the research.
     `legs` is {"left": leg_dict, "right": leg_dict}. Only measures that are reliable
     enough are shown as exact results; at low frame rates the foot landing position
     is shown as a range, and the tibia angle is left out. `recording` is "treadmill"
@@ -400,18 +425,15 @@ def build_report(fps, duration, speed_kmh, cadence, osc, trunk, legs, recording=
     runner without a problem to change cadence, foot strike or anything else.
     """
     following = recording == "following"
-    sections = []
+    sections = []   # background sections
 
     speed = f"{speed_kmh:g} km/h" if speed_kmh else "not provided"
     rec_label = "outdoors, camera following the runner" if following else "treadmill"
-    sections.append(("REPORT", [
+    result_lines = [
         f"Video: {duration:.1f} s at {fps:.0f} fps | running speed: {speed} | recording: {rec_label}",
-        "These are measurements, not a diagnosis: the article 'An Evidence-Based "
-        "Videotaped Running Biomechanics Analysis' gives no cut-off values between "
-        "normal and abnormal.",
-        "'from X to Y' is the middle half of the strikes, i.e. how much the measure "
-        "varies from step to step.",
-    ]))
+        "These are measurements, not a diagnosis. The studies give no cut-off values between "
+        "good and bad running form.",
+    ]
 
     high_fps = fps >= MIN_FPS_FOR_EVENT_MEASURES
     usable = {n: leg for n, leg in legs.items() if leg["strikes_used"] >= MIN_STRIKES_PER_LEG}
@@ -435,8 +457,10 @@ def build_report(fps, duration, speed_kmh, cadence, osc, trunk, legs, recording=
         if name not in usable:
             limits.append(f"{name.capitalize()} leg: only {leg['strikes_used']} usable strikes "
                           f"(at least {MIN_STRIKES_PER_LEG} are needed), so it is not summarized.")
-    if limits:
-        sections.append(("ANALYSIS LIMITS", [f"- {text}" for text in limits]))
+    sections.append(("HOW TO READ THE NUMBERS", [
+        "'from X to Y' is the middle half of the strikes, i.e. how much the measure varies from "
+        "step to step.",
+    ]))
 
     # Whole body
     body = []
@@ -542,9 +566,9 @@ def build_report(fps, duration, speed_kmh, cadence, osc, trunk, legs, recording=
 
     # What the report does not recommend: always shown
     sections.append(("WHAT THIS REPORT DOES NOT RECOMMEND", [
-        "- This report does not recommend changing your cadence, your foot strike or any other "
-        "aspect of your running form. If you have no pain or injury, it only describes what was "
-        "measured.",
+        "- This report does not tell you that your running form is wrong: no study gives cut-off "
+        "values. The ideas in 'check it yourself' are experiments backed by small studies, not "
+        "corrections, and none of them has been shown to prevent injuries.",
         "- A 5-10% increase in cadence appears in the research as part of supervised clinical "
         "protocols for runners with patellofemoral (kneecap) pain, where a review of reviews "
         "concluded that it may be a feasible complementary intervention, with feedback that is "
@@ -558,10 +582,6 @@ def build_report(fps, duration, speed_kmh, cadence, osc, trunk, legs, recording=
         "or a sports doctor) can assess you and, if appropriate, supervise changes to your "
         "running.",
     ]))
-
-    # Filming advice, only when something was limited
-    if limits:
-        sections.append(("FILMING TIPS", filming_tips(recording)))
 
     sections.append(("SOURCES", [
         "- 'An Evidence-Based Videotaped Running Biomechanics Analysis': framework for the "
@@ -583,7 +603,222 @@ def build_report(fps, duration, speed_kmh, cadence, osc, trunk, legs, recording=
         "review and meta-analysis of observational studies', Sports Medicine (2024).",
     ]))
 
-    return sections
+    # ----------------------------- main part: simple ------------------------------
+    legs_differ = []
+    if len(usable) == 2 and high_fps:
+        pairs = [("Knee flexion at touchdown", "flex_touchdown", "°"),
+                 ("Peak knee flexion in stance", "peak_flexion", "°")]
+        if high_fps:
+            pairs += [("Ankle relative to pelvis", "landing", "% of leg length"),
+                      ("Tibia angle", "tibia", "°")]
+        legs_differ = [x for x in (compare_legs(label, usable["left"][key],
+                                                usable["right"][key], unit)
+                                   for label, key, unit in pairs) if x]
+
+    items = []
+    if legs_differ:
+        items.append(Advice(
+            COACH, "Your two legs do not move the same way",
+            saw=" ".join(legs_differ),
+            try_this="Film yourself again from the other side. If the difference stays with the "
+                     "same leg, it may be real: pay attention to it while you run, and if you "
+                     "have pain on one side, ask a physiotherapist.",
+            why="Experts who review running videos check that the right and left sides move the "
+                "same way, because a difference can point to weakness or tightness on one side. "
+                "But the leg closest to the camera is tracked better and perspective changes the "
+                "numbers, so a difference can come from the video, and no study gives a limit "
+                "for how big a difference is a problem.",
+            sure="low", priority=5,
+            source="Vincent et al. 2014 (symmetry is part of a running video check); no reference "
+                   "value for how big a difference matters."))
+
+    # Step rate: compared with a lab group running at about the same speed
+    ref = reference_cadence(speed_kmh)
+    low_cadence = (ref is not None and not np.isnan(cadence)
+                   and cadence < ref[0] - LOW_CADENCE_SD * ref[1])
+    faster = int(round(cadence * (1 + STEP_RATE_CHANGE))) if not np.isnan(cadence) else None
+    metronome = ("Use a metronome app or a watch that beeps at the new rate, and run with it two "
+                 "or three times a week for about two weeks. Shorten your steps a little instead "
+                 "of running faster. Stop if anything hurts. At first it may feel awkward and a "
+                 "bit harder.")
+    cadence_why = ("In studies, running with 5 to 10% more steps at the same speed lowered the "
+                   "work done by the knee when the foot lands and the impact loading. A metronome "
+                   "helped runners change their step rate in two weeks without raising their "
+                   "heart rate. It has not been shown to prevent injuries, and the best step "
+                   "rate is different for everybody.")
+    if low_cadence:
+        items.append(Advice(
+            COACH, "Your steps are on the slow side for your speed",
+            saw=f"{cadence:.0f} steps per minute at {speed_kmh:g} km/h. Regular runners in a lab "
+                f"study at about this speed took roughly {ref[0]:.0f} (most between "
+                f"{ref[0] - ref[1]:.0f} and {ref[0] + ref[1]:.0f}).",
+            try_this=f"Try about {faster} steps per minute (5% more than now) for part of a run. "
+                     + metronome,
+            why=cadence_why, sure="low", priority=4,
+            source="Reference: Fukuchi et al. 2017; effects: Heiderscheit et al. 2011, Doyle et "
+                   "al. 2022, Huber & Verhoff 2024. The limit (1 SD below the group) is a choice "
+                   "of this project."))
+
+    checks = [
+        Advice(CHECK, "Run tall, do not sit",
+               try_this="Push your hips forward and up, as if a string pulled you up from the "
+                        "top of your head, and let your feet land under your body, not far in "
+                        "front of it.",
+               why="Common coaching advice to feel lighter. The studies read do not test this "
+                   "cue, and a video from the side cannot show your hips well enough to judge "
+                   "it.",
+               source="Common coaching advice."),
+    ]
+    if faster is not None and not low_cadence:
+        checks.append(Advice(
+            CHECK, "If you want to try quicker, shorter steps",
+            try_this=f"At the same speed, try about {faster} steps per minute (5% more than your "
+                     f"{cadence:.0f} now) for part of a run. " + metronome +
+                     " This is an experiment, not a target.",
+            why=cadence_why,
+            source="Heiderscheit et al. 2011; Doyle et al. 2022; Huber & Verhoff 2024."))
+    checks.append(Advice(
+        CHECK, "Let your arms swing freely",
+        try_this="Keep your shoulders relaxed and let your arms swing, with elbows bent, instead "
+                 "of holding them still.",
+        why="In a lab study, running with the arms held still cost 3 to 13% more energy and made "
+            "the trunk twist more.",
+        source="Arellano & Kram 2014."))
+    checks.append(Advice(
+        CHECK, "Land softly and quietly",
+        try_this="Listen to your feet and aim for quiet, soft landings. You do not need to change "
+                 "how your foot lands.",
+        why="Soft-landing cues lowered impact in runners with kneecap pain. Switching from heel to "
+            "forefoot landing is not recommended for runners who land on the heel: the load "
+            "moves to the ankle and calf.",
+        source="Petri et al. 2026; Vincent et al. 2014; Anderson et al. 2020; Burke et al. 2021."))
+
+    main = [("YOUR RESULT", result_lines)]
+    main.append(what_to_do_section(
+        items, "Nothing in this video clearly breaks a rule backed by research. The studies "
+               "give no cut-off values for running form, so I do not tell you to change what "
+               "you do. If you have no pain, the ideas below are experiments, not corrections."))
+    extra = extra_section(items)
+    if extra:
+        main.append(extra)
+
+    measured = []
+    if not np.isnan(cadence):
+        line = f"- Step rate: {cadence:.0f} steps per minute."
+        if ref is not None:
+            line += (f" For comparison, regular runners in a lab study at about {speed_kmh:g} km/h "
+                     f"averaged roughly {ref[0]:.0f}. It is not a target: there is no best "
+                     "number.")
+        measured.append(line)
+    if not following and summarize(osc)[3]:
+        measured.append(f"- Up and down movement of the hips: {summarize(osc)[0]:.1f}% of your "
+                        "leg length. Runners who bounce less tend to use a little less energy, "
+                        "but no value is a target. Useful to compare videos filmed the same way.")
+    t_med = summarize(trunk)[0]
+    if not np.isnan(t_med):
+        measured.append(f"- Trunk lean: {t_med:.0f}° forward (it also depends on how level the "
+                        "camera is).")
+    for name, leg in usable.items():
+        measured.append(f"- {name.capitalize()} knee: bent about "
+                        f"{summarize(leg['peak_flexion'])[0]:.0f}° at its most during the "
+                        "stance.")
+    if measured:
+        measured.append("  No advice on these numbers: the studies give no reference values.")
+        main.append(("WHAT I MEASURED (NO ADVICE)", measured))
+
+    main.append(check_section(checks))
+
+    trust = [f"- {text}" for text in limits] or ["- No problem found with this video."]
+    trust.append("- Angles from a 2D video are repeatable but only moderately close to lab "
+                 "measurements, so use them to compare your own videos rather than as exact "
+                 "values.")
+    if not following:
+        trust.append("- Treadmill running is mostly like running on the road. The main differences "
+                     "in the studies: the foot lands about 10° flatter and the body moves up and "
+                     "down about 1.5 cm less.")
+    trust.append("- Running injuries also depend on things a video cannot show, such as how much "
+                 "and how fast you increase your training, previous injuries and your general "
+                 "health.")
+    main.append(("HOW MUCH TO TRUST THIS", trust))
+    if limits:
+        main.append(("FILMING TIPS", filming_tips(recording)))
+
+    sections.insert(len(sections) - 1, ("WHAT THE RESEARCH ADDS", [
+        "- Step rate by speed (Fukuchi et al. 2017, 28 regular runners, 3D lab): 80.8, 85.7 and "
+        "91.7 strides per minute at 9, 12.6 and 16.2 km/h, that is about 162, 171 and 183 steps "
+        "per minute. Values in between are interpolated here. The group differs from you in "
+        "many ways: it is a reference to compare with, not a target.",
+        "- A study of 29 collegiate cross-country runners found a step rate of 177 steps per "
+        "minute on average, and injured runners (175) did not differ clearly from the others "
+        "(179); heavier runners tended to take fewer steps.",
+        "- Raising the step rate 5 to 10% reduced energy absorbed at the knee (5%) and hip "
+        "(10%), step length, vertical movement of the body and braking (Heiderscheit et al. "
+        "2011), and raised the activity of the gluteal muscles in late swing (Chumanov et al. "
+        "2012). A 2022 review of 19 trials found, with moderate certainty, that step-rate "
+        "retraining raised step rate and lowered the average loading rate, and two trials "
+        "reported fewer injuries after one year. Another review found that short-term effects "
+        "on injury and performance are still unclear and that a higher step rate felt harder at "
+        "first.",
+        "- A two-week programme with a metronome (5 to 10% above the starting rate, 2-3 runs a "
+        "week) raised the step rate of 33 novice and recreational runners without changing "
+        "heart rate, effort or distance; the biomechanics did not change (Huber & Verhoff "
+        "2024). A review of low-cost tools found strong evidence that metronomes, smartwatches "
+        "and cameras work for changing step rate and foot strike (Dorst et al. 2023).",
+        "- Soft-landing cues and small step-rate increases are the most consistent parts of gait "
+        "retraining for runners with kneecap pain (umbrella review, Petri et al. 2026); results "
+        "for foot strike changes and for injury prevention were less consistent.",
+        "- Running economy: a smaller vertical displacement (r = 0.35), a slightly higher "
+        "cadence (r = -0.20) and stiffer legs went with a lower energy cost; most angles and "
+        "contact times showed no clear link (Van Hooren et al. 2024). Arm swing lowers the "
+        "energy cost compared with holding the arms still (Arellano & Kram 2014).",
+        "- Treadmill and road running: most measures are similar, but on the treadmill the foot "
+        "lands about 10° flatter, the knee bends 6° less from landing to its peak, and the "
+        "pelvis moves 1.5 cm less vertically (Van Hooren et al. 2020).",
+        "- Quality of the measure: 2D video angles repeat well but agree only moderately with 3D "
+        "motion capture, and worst for the frontal and transverse planes (2023 review). "
+        "Averages of fewer than 10 strides can be misleading for small effects (Fox et al. "
+        "2023).",
+        "- Injury risk factors: an umbrella review of 13 low-quality reviews found that training "
+        "characteristics, health and lifestyle, and morphological and biomechanical factors "
+        "are all linked with running injuries (Correia et al. 2024).",
+        "- Pronation: gait retraining can reduce foot pronation (Mousavi et al. 2024), but it "
+        "needs a view from behind, so it is not measured here.",
+    ]))
+    sections[-1][1].extend([
+        "- Fukuchi, Fukuchi and Duarte (2017), PeerJ: 'A public dataset of running biomechanics and "
+        "the effects of running speed on lower extremity kinematics and kinetics'.",
+        "- Luedke and Rauh (2021), Frontiers in Sports and Active Living: 'Factors associated with "
+        "self-selected step rates between collegiate and high school cross country runners'.",
+        "- Heiderscheit et al. (2011), Medicine & Science in Sports & Exercise: 'Effects of step "
+        "rate manipulation on joint mechanics during running'.",
+        "- Chumanov et al. (2012), Gait & Posture: 'Changes in muscle activation patterns when "
+        "running step rate is increased'.",
+        "- Doyle et al. (2022), JOSPT: 'The effectiveness of gait retraining on running "
+        "kinematics, kinetics, performance, pain, and injury in distance runners'.",
+        "- Huber and Verhoff (2024), IJSPT: 'A one session gait retraining protocol with "
+        "metronome augmentation increases cadence in novice and recreational runners'.",
+        "- Dorst et al. (2023), Applied Sciences: 'Effectiveness of lower-cost strategies for "
+        "running gait retraining'.",
+        "- Petri et al. (2026), Sports Medicine - Open: 'Gait retraining for patellofemoral pain "
+        "in runners: an umbrella review'.",
+        "- Mousavi et al. (2024), PLOS ONE: 'Gait retraining targeting foot pronation'.",
+        "- Arellano and Kram (2014), Journal of Experimental Biology: 'The metabolic cost of "
+        "human running: is swinging the arms worth it?' (abstract).",
+        "- Van Hooren et al. (2020), Sports Medicine: 'Is motorized treadmill running "
+        "biomechanically comparable to overground running?'.",
+        "- Fox et al. (2023), PeerJ: 'Measurement error associated with gait cycle selection in "
+        "treadmill running at various speeds'.",
+        "- Vincent et al. (2014), Current Sports Medicine Reports: 'Setting standards for "
+        "medically-based running analysis'.",
+        "- Correia et al. (2024), Journal of Sport and Health Science: 'Risk factors for "
+        "running-related injuries: an umbrella systematic review'.",
+        "- 2D video validity and reliability of joint angles in running: systematic review and "
+        "meta-analysis (2023, abstract).",
+        "- Ferber et al. (2024), Scientific Data: open dataset of 1,798 healthy and injured "
+        "runners and walkers (raw data; not used for any value in this report).",
+    ])
+    sections[-1][1].extend(source_lines(items + checks))
+    return main, sections
 
 
 def report_to_text(sections):
@@ -608,7 +843,8 @@ def analyze_video(video, speed_kmh=None, output_dir="data/output", recording="tr
     following the runner).
 
     Returns a dict with:
-      sections       the report, as a list of (title, lines) sections
+      sections       the main report (plain language), as a list of (title, lines)
+      background     the numbers, limits and research, in the same form
       report_text    the same report as plain text
       details        the technical numbers, as text
       skeleton_path  path of the video with the skeleton drawn on it
@@ -690,11 +926,13 @@ def analyze_video(video, speed_kmh=None, output_dir="data/output", recording="tr
     else:
         raw_path.replace(final_path)
 
-    sections = build_report(fps, duration, speed_kmh, cadence if used else float("nan"),
-                            osc, trunk, legs, recording=recording)
+    main_sections, background = build_report(
+        fps, duration, speed_kmh, cadence if used else float("nan"), osc, trunk, legs,
+        recording=recording)
     return {
-        "sections": sections,
-        "report_text": report_to_text(sections),
+        "sections": main_sections,
+        "background": background,
+        "report_text": report_to_text(main_sections + background),
         "details": details.getvalue(),
         "skeleton_path": final_path,
         "fps": fps,
@@ -732,4 +970,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
