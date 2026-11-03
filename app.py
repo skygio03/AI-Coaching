@@ -77,24 +77,46 @@ if tips:
 uploaded = st.file_uploader("Video", type=["mp4", "mov", "m4v", "avi"])
 
 # The running speed is only asked for sports that use it
-speed = 0.0
+speed = None          # always in km/h (the sport converts what the user typed)
+speed_unit = None     # internal key of the unit chosen in the dropdown
+speed_error = None
 if hasattr(sport, "SPEED_HELP"):
-    speed_help = sport.SPEED_HELP.get(recording, "Leave at 0 if you do not know it.")
-    speed = st.number_input(
-        "Running speed (km/h)", min_value=0.0, max_value=40.0, value=0.0, step=0.5,
-        help=speed_help + " For now it is only written in the report.",
-    )
+    speed_help = sport.SPEED_HELP.get(recording, "Leave empty if you do not know it.")
+    speed_units = getattr(sport, "SPEED_UNITS", {})
+    if speed_units:
+        # Text field + unit dropdown side by side; text so that a pace like 5:30 can be typed
+        col_value, col_unit = st.columns([2, 1])
+        unit_label = col_unit.selectbox("Unit", list(speed_units))
+        speed_unit = speed_units[unit_label]
+        is_pace = speed_unit in ("min_km", "min_mile")
+        speed_text = col_value.text_input(
+            "Running pace" if is_pace else "Running speed",
+            placeholder="e.g. 5:30 (minutes:seconds)" if is_pace else "e.g. 12.5",
+            help=speed_help,
+        )
+        try:
+            speed = sport.parse_speed(speed_text, speed_unit)
+        except ValueError as error:
+            speed_error = str(error)
+            st.error(speed_error)
+    else:
+        speed = st.number_input(
+            "Running speed (km/h)", min_value=0.0, max_value=40.0, value=0.0, step=0.5,
+            help=speed_help,
+        ) or None
 
-if st.button("Analyse", type="primary", disabled=uploaded is None):
+if st.button("Analyse", type="primary", disabled=uploaded is None or speed_error is not None):
     # OpenCV reads from a file path, so the upload is saved to a temporary folder
     suffix = Path(uploaded.name).suffix or ".mp4"
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         video_path = Path(tmp) / f"upload{suffix}"
         video_path.write_bytes(uploaded.getbuffer())
         options = {"recording": recording} if recording else {}
+        if speed_unit:
+            options["speed_unit"] = speed_unit
         with st.spinner("Analysing the video (this can take a minute)..."):
             try:
-                result = sport.analyze_video(video_path, speed or None,
+                result = sport.analyze_video(video_path, speed,
                                              output_dir=Path(tmp), **options)
             except (FileNotFoundError, ValueError) as error:
                 st.error(str(error))

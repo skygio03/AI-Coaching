@@ -38,10 +38,71 @@ RECORDING_OPTIONS = {
     "Outdoors, camera following the runner": "following",
 }
 SPEED_HELP = {
-    "treadmill": "The speed shown on the treadmill display. Leave at 0 if you do not know it.",
-    "following": "From your watch/GPS, or distance divided by time. Leave at 0 if you do not "
+    "treadmill": "The speed shown on the treadmill display. Leave empty if you do not know it.",
+    "following": "From your watch/GPS, or distance divided by time. Leave empty if you do not "
                  "know it.",
 }
+
+# Units for the running speed: label shown in the interface -> internal key.
+# Everything inside the analysis stays in km/h; the unit is only used to read the
+# value typed by the user and to show it back in the report.
+SPEED_UNITS = {
+    "km/h": "kmh",
+    "mph (miles/h)": "mph",
+    "min/km (pace)": "min_km",
+    "min/mile (pace)": "min_mile",
+}
+KM_PER_MILE = 1.609344
+
+
+def parse_speed(text, unit="kmh"):
+    """Convert the speed typed by the user into km/h. Returns None if empty or 0.
+
+    Speeds (km/h, mph) accept "12.5" or "12,5". Paces (min/km, min/mile) accept
+    "5:30" (minutes:seconds) or a decimal number of minutes ("5.5").
+    Raises ValueError with a readable message if the text is not valid.
+    """
+    if unit not in SPEED_UNITS.values():
+        raise ValueError(f"Unknown speed unit: {unit}")
+    text = str(text or "").strip().replace(",", ".")
+    if not text:
+        return None
+    try:
+        if ":" in text:
+            if unit not in ("min_km", "min_mile"):
+                raise ValueError
+            minutes, seconds = text.split(":")
+            if not 0 <= float(seconds) < 60:
+                raise ValueError
+            value = float(minutes) + float(seconds) / 60
+        else:
+            value = float(text)
+    except ValueError:
+        example = "5:30" if unit in ("min_km", "min_mile") else "12.5"
+        raise ValueError(f"Invalid speed: '{text}'. Example of a valid value: {example}") from None
+    if value <= 0:
+        return None
+    if unit == "kmh":
+        return value
+    if unit == "mph":
+        return value * KM_PER_MILE
+    if unit == "min_km":
+        return 60.0 / value
+    return 60.0 * KM_PER_MILE / value          # min_mile
+
+
+def format_speed(speed_kmh, unit="kmh"):
+    """Show a speed in km/h in the unit chosen by the user, e.g. '12.6 km/h' or '4:46 min/km'."""
+    if not speed_kmh:
+        return "not provided"
+    if unit == "mph":
+        return f"{speed_kmh / KM_PER_MILE:.1f} mph"
+    if unit in ("min_km", "min_mile"):
+        km = 1.0 if unit == "min_km" else KM_PER_MILE
+        total_s = int(round(3600 * km / speed_kmh))
+        label = "min/km" if unit == "min_km" else "min/mile"
+        return f"{total_s // 60}:{total_s % 60:02d} {label}"
+    return f"{speed_kmh:.1f} km/h"
 
 
 # ------------------------------- basic helpers -------------------------------
@@ -410,7 +471,8 @@ def filming_tips(recording="treadmill"):
     ]
 
 
-def build_report(fps, duration, speed_kmh, cadence, osc, trunk, legs, recording="treadmill"):
+def build_report(fps, duration, speed_kmh, cadence, osc, trunk, legs, recording="treadmill",
+                 speed_unit="kmh"):
     """Return (main_sections, background_sections), each a list of (title, lines).
 
     Lines starting with "- " are bullet points; any other line is an explanatory note.
@@ -427,7 +489,7 @@ def build_report(fps, duration, speed_kmh, cadence, osc, trunk, legs, recording=
     following = recording == "following"
     sections = []   # background sections
 
-    speed = f"{speed_kmh:g} km/h" if speed_kmh else "not provided"
+    speed = format_speed(speed_kmh, speed_unit)
     rec_label = "outdoors, camera following the runner" if following else "treadmill"
     result_lines = [
         f"Video: {duration:.1f} s at {fps:.0f} fps | running speed: {speed} | recording: {rec_label}",
@@ -649,7 +711,7 @@ def build_report(fps, duration, speed_kmh, cadence, osc, trunk, legs, recording=
     if low_cadence:
         items.append(Advice(
             COACH, "Your steps are on the slow side for your speed",
-            saw=f"{cadence:.0f} steps per minute at {speed_kmh:g} km/h. Regular runners in a lab "
+            saw=f"{cadence:.0f} steps per minute at {speed}. Regular runners in a lab "
                 f"study at about this speed took roughly {ref[0]:.0f} (most between "
                 f"{ref[0] - ref[1]:.0f} and {ref[0] + ref[1]:.0f}).",
             try_this=f"Try about {faster} steps per minute (5% more than now) for part of a run. "
@@ -706,7 +768,7 @@ def build_report(fps, duration, speed_kmh, cadence, osc, trunk, legs, recording=
     if not np.isnan(cadence):
         line = f"- Step rate: {cadence:.0f} steps per minute."
         if ref is not None:
-            line += (f" For comparison, regular runners in a lab study at about {speed_kmh:g} km/h "
+            line += (f" For comparison, regular runners in a lab study at about {speed} "
                      f"averaged roughly {ref[0]:.0f}. It is not a target: there is no best "
                      "number.")
         measured.append(line)
@@ -836,11 +898,14 @@ def report_to_text(sections):
 
 # ----------------------------------- the analysis -------------------------------
 
-def analyze_video(video, speed_kmh=None, output_dir="data/output", recording="treadmill"):
+def analyze_video(video, speed_kmh=None, output_dir="data/output", recording="treadmill",
+                  speed_unit="kmh"):
     """Run the full running analysis on one video.
 
     `recording` is "treadmill" (camera still) or "following" (outdoors, camera
-    following the runner).
+    following the runner). `speed_kmh` is always in km/h (use parse_speed() to
+    convert what the user typed); `speed_unit` is only the unit used to show the
+    speed in the report.
 
     Returns a dict with:
       sections       the main report (plain language), as a list of (title, lines)
@@ -855,6 +920,8 @@ def analyze_video(video, speed_kmh=None, output_dir="data/output", recording="tr
     """
     if recording not in RECORDING_OPTIONS.values():
         raise ValueError(f"Unknown recording type: {recording}")
+    if speed_unit not in SPEED_UNITS.values():
+        raise ValueError(f"Unknown speed unit: {speed_unit}")
     following = recording == "following"
 
     video = Path(video)
@@ -928,7 +995,7 @@ def analyze_video(video, speed_kmh=None, output_dir="data/output", recording="tr
 
     main_sections, background = build_report(
         fps, duration, speed_kmh, cadence if used else float("nan"), osc, trunk, legs,
-        recording=recording)
+        recording=recording, speed_unit=speed_unit)
     return {
         "sections": main_sections,
         "background": background,
@@ -941,24 +1008,30 @@ def analyze_video(video, speed_kmh=None, output_dir="data/output", recording="tr
 
 
 def main():
-    """Command-line use: python -m src.sports.running VIDEO [SPEED_KMH] [treadmill|following]"""
+    """Command-line use:
+    python -m src.sports.running VIDEO [SPEED] [treadmill|following] [kmh|mph|min_km|min_mile]
+
+    Examples: ... run.mp4 12.5 treadmill kmh    ... run.mp4 5:30 following min_km
+    """
     args = sys.argv[1:]
     video = Path(args[0]) if args else Path("data/input/run.mp4")
-    speed_kmh = None
-    if len(args) > 1:
-        try:
-            speed_kmh = float(args[1].replace(",", "."))
-        except ValueError:
-            print(f"The speed must be a number in km/h, got: {args[1]}")
-            return
     recording = args[2] if len(args) > 2 else "treadmill"
     if recording not in RECORDING_OPTIONS.values():
         print(f"The recording type must be one of: {', '.join(RECORDING_OPTIONS.values())}")
         return
+    speed_unit = args[3] if len(args) > 3 else "kmh"
+    if speed_unit not in SPEED_UNITS.values():
+        print(f"The speed unit must be one of: {', '.join(SPEED_UNITS.values())}")
+        return
+    try:
+        speed_kmh = parse_speed(args[1] if len(args) > 1 else "", speed_unit)
+    except ValueError as error:
+        print(error)
+        return
 
     print("Analyzing the video (this can take a minute)...")
     try:
-        result = analyze_video(video, speed_kmh, recording=recording)
+        result = analyze_video(video, speed_kmh, recording=recording, speed_unit=speed_unit)
     except (FileNotFoundError, ValueError) as error:
         print(error)
         return
